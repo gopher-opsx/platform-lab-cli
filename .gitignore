@@ -1,10 +1,10 @@
-# Go binaries
-lab
-lab.exe
+# Go binaries at repository root
+/lab
+/lab.exe
 
 # Build output
-bin/
-dist/
+/bin/
+/dist/
 
 # IDE
 .idea/
