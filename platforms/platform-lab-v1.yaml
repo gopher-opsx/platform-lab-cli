@@ -1,0 +1,18 @@
+name: platform-lab
+version: "1"
+
+compose_files:
+  - platform/docker/compose.yaml
+  - platform/docker/compose.observability.yaml
+
+required_services:
+  - postgres
+  - redis
+  - kafka
+  - catalog-service
+  - cart-service
+  - order-service
+  - inventory-service
+  - payment-service
+  - notification-service
+  - web-bff

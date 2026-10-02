@@ -1,0 +1,41 @@
+id: redis-down
+
+name: Redis Goes Down
+
+description: >
+  Creates a controlled Redis availability incident affecting
+  the Platform Lab cart workflow.
+
+course: 1
+lesson: 45
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - redis
+    - cart-service
+
+inject:
+  - type: stop_service
+    target: redis
+
+verify_failure:
+  - type: service_state
+    target: redis
+    expected: stopped
+
+rollback:
+  - type: restore_service_state
+    target: redis
+
+verify_recovery:
+  - type: service_health
+    target: redis
+    expected: healthy
+
+  - type: service_health
+    target: cart-service
+    expected: healthy

@@ -1,0 +1,22 @@
+# Go binaries
+lab
+lab.exe
+
+# Build output
+bin/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Lab runtime data
+.lab/
+
+# Temporary files
+*.tmp
+*.log
