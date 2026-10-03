@@ -46,6 +46,12 @@ const dnsFailureOverride = `services:
         exec /service
 `
 
+const portFailureOverride = `services:
+  web-bff:
+    ports: !override
+      - "18080:8080"
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -103,6 +109,14 @@ var startCmd = &cobra.Command{
 
 		case "dns-failure":
 			return startDNSFailure(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "port-failure":
+			return startPortFailure(
 				out,
 				root,
 				client,
@@ -866,6 +880,117 @@ func startDNSFailure(
 
 	fmt.Fprintln(out, "✓ PostgreSQL readiness failure verified")
 	fmt.Fprintln(out, "✓ DATABASE_URL remains configured for postgres:5432")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Begin troubleshooting from the customer symptom.")
+	return nil
+}
+
+func startPortFailure(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	running, err := client.IsRunning("web-bff")
+	if err != nil {
+		return fmt.Errorf("inspect Web BFF state: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("web-bff is not running; start Platform Lab before starting this scenario")
+	}
+
+	health, err := client.HealthStatus("web-bff")
+	if err != nil {
+		return fmt.Errorf("inspect Web BFF health: %w", err)
+	}
+	if health != "healthy" {
+		return fmt.Errorf("web-bff is not healthy before scenario start; current health: %s", health)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/healthz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("web-bff host baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ Web BFF baseline is running, healthy, and reachable on localhost:8080")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "web-bff",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("web-bff")
+		if err := client.WaitForHealthy("web-bff", 30*time.Second); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(root, portFailureOverride); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Controlled host port failure prepared")
+
+	if err := client.RecreateWithOverride("web-bff"); err != nil {
+		rollback()
+		return err
+	}
+	fmt.Fprintln(out, "✓ Web BFF recreated with incorrect host port exposure")
+
+	running, err = client.IsRunning("web-bff")
+	if err != nil {
+		rollback()
+		return err
+	}
+	if !running {
+		rollback()
+		return fmt.Errorf("port-failure verification failed: web-bff stopped")
+	}
+
+	if err := client.WaitForHealthy("web-bff", 30*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("port-failure internal health verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Web BFF remains healthy inside the container")
+
+	if err := platform.WaitForHTTPUnavailable(
+		"http://localhost:8080/healthz",
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("port-failure expected-port verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Expected host port localhost:8080 is unavailable")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:18080/healthz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("port-failure alternate-port verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Web BFF is reachable through the incorrectly published host port 18080")
+
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Incident active. Begin troubleshooting from the customer symptom.")
 	return nil

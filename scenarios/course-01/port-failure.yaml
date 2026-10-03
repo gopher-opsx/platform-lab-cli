@@ -1,0 +1,46 @@
+id: port-failure
+name: Web BFF Port Exposure Failure
+description: >
+  Keeps the Web BFF application healthy inside its container while replacing
+  the expected host port 8080 with an incorrect published host port.
+
+course: 1
+lesson: 35
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - web-bff
+
+inject:
+  - type: port_failure
+    target: web-bff
+
+verify_failure:
+  - type: service_state
+    target: web-bff
+    expected: running
+  - type: service_health
+    target: web-bff
+    expected: healthy
+  - type: host_port
+    target: localhost:8080
+    expected: unavailable
+  - type: host_port
+    target: localhost:18080
+    expected: available
+
+rollback:
+  - type: restore_compose_baseline
+    target: web-bff
+
+verify_recovery:
+  - type: service_health
+    target: web-bff
+    expected: healthy
+  - type: host_port
+    target: localhost:8080
+    expected: available
