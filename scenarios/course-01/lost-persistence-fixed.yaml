@@ -1,0 +1,41 @@
+id: lost-persistence
+name: PostgreSQL Lost Persistence
+description: >
+  Demonstrates lost persistence by writing test data to one isolated
+  Lab-owned PostgreSQL volume and then recreating PostgreSQL on a different
+  fresh Lab-owned volume. The real Platform Lab PostgreSQL volume is untouched.
+
+course: 1
+lesson: 37
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - postgres
+
+inject:
+  - type: lost_persistence
+    target: postgres
+
+verify_failure:
+  - type: service_state
+    target: postgres
+    expected: running
+  - type: service_health
+    target: postgres
+    expected: healthy
+  - type: persistence_marker
+    target: postgres
+    expected: lost_after_storage_change
+
+rollback:
+  - type: restore_compose_baseline
+    target: postgres
+
+verify_recovery:
+  - type: service_health
+    target: postgres
+    expected: healthy

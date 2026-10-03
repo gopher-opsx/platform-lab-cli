@@ -100,6 +100,29 @@ var resetCmd = &cobra.Command{
 		}
 
 		/*
+			Lesson 37 creates two hard-coded Lab-owned PostgreSQL
+			volumes. Remove them only after the normal PostgreSQL
+			baseline has been restored successfully.
+
+			RemoveLabVolume has its own safety guard and refuses
+			to remove volumes outside the platform-lab-lab- namespace.
+		*/
+		if session.Scenario == "lost-persistence" {
+			fmt.Fprintln(out, "Removing Lab-owned temporary PostgreSQL volumes...")
+
+			for _, volume := range []string{
+				"platform-lab-lab-postgres-a",
+				"platform-lab-lab-postgres-b",
+			} {
+				if err := client.RemoveLabVolume(volume); err != nil {
+					return err
+				}
+			}
+
+			fmt.Fprintln(out, "✓ Lab-owned temporary PostgreSQL volumes removed")
+		}
+
+		/*
 			State is removed only after all rollback
 			operations succeed.
 		*/

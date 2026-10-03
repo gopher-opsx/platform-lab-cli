@@ -245,6 +245,44 @@ func (c Client) WaitForHealthStatus(
 	)
 }
 
+func (c Client) CreateLabVolume(name string) error {
+	if !strings.HasPrefix(name, "platform-lab-lab-") {
+		return fmt.Errorf("refusing to create non-Lab volume %q", name)
+	}
+
+	_, err := runner.Run(
+		c.Root,
+		"docker",
+		"volume",
+		"create",
+		name,
+	)
+	if err != nil {
+		return fmt.Errorf("create Lab volume %s: %w", name, err)
+	}
+
+	return nil
+}
+
+func (c Client) RemoveLabVolume(name string) error {
+	if !strings.HasPrefix(name, "platform-lab-lab-") {
+		return fmt.Errorf("refusing to remove non-Lab volume %q", name)
+	}
+
+	_, err := runner.Run(
+		c.Root,
+		"docker",
+		"volume",
+		"rm",
+		name,
+	)
+	if err != nil {
+		return fmt.Errorf("remove Lab volume %s: %w", name, err)
+	}
+
+	return nil
+}
+
 func (c Client) Exec(
 	service string,
 	args ...string,

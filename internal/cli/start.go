@@ -142,6 +142,14 @@ var startCmd = &cobra.Command{
 				s.ID,
 			)
 
+		case "lost-persistence":
+			return startLostPersistence(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
 		case "redis-down":
 			return startRedisDown(
 				out,
@@ -1143,6 +1151,168 @@ func startDependencyNotReady(
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Incident observed and dependency recovery verified. Run lab reset to restore the baseline configuration.")
+	return nil
+}
+
+func lostPersistenceOverride(volumeName string) string {
+	return fmt.Sprintf(`services:
+  postgres:
+    volumes: !override
+      - type: volume
+        source: %s
+        target: /var/lib/postgresql/data
+volumes:
+  %s:
+    external: true
+    name: %s
+`, volumeName, volumeName, volumeName)
+}
+
+func startLostPersistence(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	const volumeA = "platform-lab-lab-postgres-a"
+	const volumeB = "platform-lab-lab-postgres-b"
+
+	postgresRunning, err := client.IsRunning("postgres")
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL state: %w", err)
+	}
+	if !postgresRunning {
+		return fmt.Errorf("postgres is not running; start Platform Lab before starting this scenario")
+	}
+
+	postgresHealth, err := client.HealthStatus("postgres")
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL health: %w", err)
+	}
+	if postgresHealth != "healthy" {
+		return fmt.Errorf("postgres is not healthy before scenario start; current health: %s", postgresHealth)
+	}
+
+	fmt.Fprintln(out, "✓ PostgreSQL baseline is running and healthy")
+	fmt.Fprintln(out, "✓ Real PostgreSQL volume docker_postgres-data will remain untouched")
+
+	// Remove leftovers only from the two hard-coded Lab-owned volumes.
+	_ = client.RemoveLabVolume(volumeA)
+	_ = client.RemoveLabVolume(volumeB)
+
+	if err := client.CreateLabVolume(volumeA); err != nil {
+		return err
+	}
+	if err := client.CreateLabVolume(volumeB); err != nil {
+		_ = client.RemoveLabVolume(volumeA)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Isolated Lab-owned PostgreSQL volumes created")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "postgres",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+	if err := state.Save(root, session); err != nil {
+		_ = client.RemoveLabVolume(volumeA)
+		_ = client.RemoveLabVolume(volumeB)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("postgres")
+		if err := client.WaitForHealthy("postgres", 30*time.Second); err == nil {
+			_ = client.RemoveLabVolume(volumeA)
+			_ = client.RemoveLabVolume(volumeB)
+			_ = state.Clear(root)
+		}
+	}
+
+	// Phase A: PostgreSQL uses Lab volume A.
+	if err := compose.WriteOverride(root, lostPersistenceOverride(volumeA)); err != nil {
+		rollback()
+		return err
+	}
+	if err := client.RecreateWithOverride("postgres"); err != nil {
+		rollback()
+		return err
+	}
+	if err := client.WaitForHealthy("postgres", 30*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("lost-persistence volume A startup failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ PostgreSQL is running on Lab-owned volume A")
+
+	if err := client.Exec(
+		"postgres",
+		"psql",
+		"-U", "platform",
+		"-d", "postgres",
+		"-v", "ON_ERROR_STOP=1",
+		"-c", "CREATE TABLE lab_persistence_marker (value text NOT NULL); INSERT INTO lab_persistence_marker(value) VALUES ('lesson-37');",
+	); err != nil {
+		rollback()
+		return fmt.Errorf("create persistence marker: %w", err)
+	}
+
+	if err := client.Exec(
+		"postgres",
+		"psql",
+		"-U", "platform",
+		"-d", "postgres",
+		"-tAc", "SELECT value FROM lab_persistence_marker WHERE value='lesson-37';",
+	); err != nil {
+		rollback()
+		return fmt.Errorf("verify persistence marker on volume A: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Test data exists on volume A")
+
+	// Phase B: switch to a different fresh Lab-owned volume.
+	if err := compose.WriteOverride(root, lostPersistenceOverride(volumeB)); err != nil {
+		rollback()
+		return err
+	}
+	fmt.Fprintln(out, "Switching PostgreSQL to fresh Lab-owned volume B...")
+
+	if err := client.RecreateWithOverride("postgres"); err != nil {
+		rollback()
+		return err
+	}
+	if err := client.WaitForHealthy("postgres", 30*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("lost-persistence volume B startup failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ PostgreSQL recreated on fresh volume B")
+
+	err = client.Exec(
+		"postgres",
+		"psql",
+		"-U", "platform",
+		"-d", "postgres",
+		"-tAc", "SELECT value FROM lab_persistence_marker WHERE value='lesson-37';",
+	)
+	if err == nil {
+		rollback()
+		return fmt.Errorf("lost-persistence verification failed: marker unexpectedly exists on fresh volume B")
+	}
+
+	fmt.Fprintln(out, "✓ Test data from volume A is absent on fresh volume B")
+	fmt.Fprintln(out, "✓ Lost persistence verified")
+	fmt.Fprintln(out, "✓ Real docker_postgres-data volume was never mounted by the incident")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Run lab reset to restore the real persistent PostgreSQL volume.")
 	return nil
 }
 
