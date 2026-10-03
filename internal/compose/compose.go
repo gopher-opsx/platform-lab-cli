@@ -2,7 +2,9 @@ package compose
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gopher-opsx/platform-lab-cli/internal/runner"
 )
@@ -98,4 +100,118 @@ func (c Client) IsRunning(service string) (bool, error) {
 	}
 
 	return strings.TrimSpace(result.Stdout) == "true", nil
+}
+
+func (c Client) RestartCount(service string) (int, error) {
+	id, err := c.ServiceID(service)
+	if err != nil {
+		return 0, err
+	}
+
+	if id == "" {
+		return 0, fmt.Errorf(
+			"container for service %s was not found",
+			service,
+		)
+	}
+
+	result, err := runner.Run(
+		c.Root,
+		"docker",
+		"inspect",
+		"-f",
+		"{{.RestartCount}}",
+		id,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := strconv.Atoi(
+		strings.TrimSpace(result.Stdout),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"parse restart count for %s: %w",
+			service,
+			err,
+		)
+	}
+
+	return count, nil
+}
+
+func (c Client) HealthStatus(service string) (string, error) {
+	id, err := c.ServiceID(service)
+	if err != nil {
+		return "", err
+	}
+
+	if id == "" {
+		return "", fmt.Errorf(
+			"container for service %s was not found",
+			service,
+		)
+	}
+
+	result, err := runner.Run(
+		c.Root,
+		"docker",
+		"inspect",
+		"-f",
+		"{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+		id,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(result.Stdout), nil
+}
+
+func (c Client) WaitForRestart(
+	service string,
+	timeout time.Duration,
+) error {
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		count, err := c.RestartCount(service)
+		if err == nil && count > 0 {
+			return nil
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return fmt.Errorf(
+		"%s did not enter a restart loop within %s",
+		service,
+		timeout,
+	)
+}
+
+func (c Client) WaitForHealthy(
+	service string,
+	timeout time.Duration,
+) error {
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		health, err := c.HealthStatus(service)
+
+		if err == nil && health == "healthy" {
+			return nil
+		}
+
+		time.Sleep(time.Second)
+	}
+
+	return fmt.Errorf(
+		"%s did not become healthy within %s",
+		service,
+		timeout,
+	)
 }

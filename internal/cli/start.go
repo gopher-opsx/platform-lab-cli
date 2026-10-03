@@ -147,12 +147,47 @@ func startRestartLoop(
 
 	fmt.Fprintln(out, "✓ Catalog failure injected")
 
-	/*
-		Do not claim that we've diagnosed the incident.
+	fmt.Fprintln(
+		out,
+		"Waiting for restart behavior...",
+	)
 
-		The student should investigate the restart behavior,
-		container state and logs themselves.
-	*/
+	if err := client.WaitForRestart(
+		"catalog-service",
+		15*time.Second,
+	); err != nil {
+
+		/*
+			The injection did not produce the incident we promised.
+
+			Try to return the environment to baseline rather
+			than leaving the student with a partial scenario.
+		*/
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+
+		/*
+			Only clear state if our cleanup succeeded enough
+			to return Catalog to health.
+		*/
+		if healthErr := client.WaitForHealthy(
+			"catalog-service",
+			30*time.Second,
+		); healthErr == nil {
+			_ = state.Clear(root)
+		}
+
+		return fmt.Errorf(
+			"restart-loop verification failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Restart loop verified",
+	)
+
 	fmt.Fprintln(out)
 	fmt.Fprintln(
 		out,

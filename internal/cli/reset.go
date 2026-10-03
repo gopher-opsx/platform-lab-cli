@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -144,21 +145,31 @@ func resetComposeOverride(
 		return err
 	}
 
-	running, err := client.IsRunning(service)
-	if err != nil {
-		return err
-	}
+	fmt.Fprintf(
+		out,
+		"Waiting for %s to become healthy...\n",
+		service,
+	)
 
-	if !running {
+	if err := client.WaitForHealthy(
+		service,
+		30*time.Second,
+	); err != nil {
 		return fmt.Errorf(
-			"%s did not return to running state",
-			service,
+			"baseline configuration was restored but recovery verification failed: %w",
+			err,
 		)
 	}
 
 	fmt.Fprintf(
 		out,
 		"✓ %s baseline configuration restored\n",
+		service,
+	)
+
+	fmt.Fprintf(
+		out,
+		"✓ %s recovery verified\n",
 		service,
 	)
 
