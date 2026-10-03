@@ -1,0 +1,39 @@
+id: bad-environment
+name: Catalog Environment Configuration Failure
+description: >
+  Gives Catalog an incorrect PostgreSQL destination while keeping
+  the Catalog application and PostgreSQL service running.
+
+course: 1
+lesson: 33
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - postgres
+    - catalog-service
+
+inject:
+  - type: apply_bad_environment
+    target: catalog-service
+
+verify_failure:
+  - type: service_state
+    target: catalog-service
+    expected: running
+
+  - type: service_health
+    target: catalog-service
+    expected: unhealthy
+
+rollback:
+  - type: restore_service
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy

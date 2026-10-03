@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,12 @@ const runningButDeadOverride = `services:
       - |
         echo "Lab scenario active: Catalog application is not started"
         exec sleep 3600
+`
+
+const badEnvironmentOverride = `services:
+  catalog-service:
+    environment:
+      DATABASE_URL: "postgres://platform:platform@wrong-postgres:5432/catalog_db?sslmode=disable"
 `
 
 var startCmd = &cobra.Command{
@@ -70,6 +77,14 @@ var startCmd = &cobra.Command{
 			)
 		case "running-but-dead":
 			return startRunningButDead(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "bad-environment":
+			return startBadEnvironment(
 				out,
 				root,
 				client,
@@ -446,6 +461,278 @@ func startRunningButDead(
 	fmt.Fprintln(
 		out,
 		"✓ Catalog application is unavailable",
+	)
+
+	fmt.Fprintln(out)
+
+	fmt.Fprintln(
+		out,
+		"Incident active. Begin troubleshooting from the customer symptom.",
+	)
+
+	return nil
+}
+
+func startBadEnvironment(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+
+	/*
+		Lesson 33 begins from a healthy Catalog.
+
+		The incident must not be confused with:
+		- Lesson 31: Catalog process exits and restarts.
+		- Lesson 32: container runs but Catalog process is absent.
+
+		Here Catalog must remain alive while receiving incorrect
+		runtime dependency configuration.
+	*/
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf(
+			"inspect Catalog state: %w",
+			err,
+		)
+	}
+
+	if !running {
+		return fmt.Errorf(
+			"catalog-service is not running; start Platform Lab before starting this scenario",
+		)
+	}
+
+	health, err := client.HealthStatus("catalog-service")
+	if err != nil {
+		return fmt.Errorf(
+			"inspect Catalog health: %w",
+			err,
+		)
+	}
+
+	if health != "healthy" {
+		return fmt.Errorf(
+			"catalog-service is not healthy before scenario start; current health: %s",
+			health,
+		)
+	}
+
+	postgresRunning, err := client.IsRunning("postgres")
+	if err != nil {
+		return fmt.Errorf(
+			"inspect PostgreSQL state: %w",
+			err,
+		)
+	}
+
+	if !postgresRunning {
+		return fmt.Errorf(
+			"postgres is not running; start Platform Lab before starting this scenario",
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog and PostgreSQL baseline are running",
+	)
+
+	/*
+		Record recovery information before touching the
+		running Platform Lab environment.
+	*/
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          ".lab/compose.override.yaml",
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Recovery state recorded",
+	)
+
+	/*
+		Inject a syntactically valid DATABASE_URL.
+
+		The URL itself is valid, so pgxpool can be created and
+		Catalog can start its HTTP server.
+
+		The dependency hostname is intentionally incorrect:
+		    wrong-postgres
+
+		This creates a runtime configuration incident rather
+		than a malformed-configuration startup failure.
+	*/
+	if err := compose.WriteOverride(
+		root,
+		badEnvironmentOverride,
+	); err != nil {
+
+		_ = state.Clear(root)
+
+		return err
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Incorrect runtime configuration prepared",
+	)
+
+	if err := client.RecreateWithOverride(
+		"catalog-service",
+	); err != nil {
+
+		_ = compose.RemoveOverride(root)
+		_ = state.Clear(root)
+
+		return err
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog recreated with controlled configuration failure",
+	)
+
+	/*
+		The first defining property of Lesson 33 is that the
+		Catalog container still runs.
+
+		If it exits, we have accidentally created another
+		Lesson 31-style startup failure.
+	*/
+	running, err = client.IsRunning("catalog-service")
+	if err != nil {
+		return err
+	}
+
+	if !running {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+
+		if healthErr := client.WaitForHealthy(
+			"catalog-service",
+			30*time.Second,
+		); healthErr == nil {
+			_ = state.Clear(root)
+		}
+
+		return fmt.Errorf(
+			"bad-environment verification failed: catalog-service did not remain running",
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog container remains running",
+	)
+
+	/*
+		The second defining property is application liveness.
+
+		/healthz represents the Catalog process itself, not
+		PostgreSQL readiness.
+
+		WaitForHTTPUnavailable is therefore not appropriate
+		for this scenario: /healthz should remain available.
+	*/
+	fmt.Fprintln(
+		out,
+		"Waiting for Catalog application to become live...",
+	)
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/healthz",
+		http.StatusOK,
+		15*time.Second,
+	); err != nil {
+
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+
+		if healthErr := client.WaitForHealthy(
+			"catalog-service",
+			30*time.Second,
+		); healthErr == nil {
+			_ = state.Clear(root)
+		}
+
+		return fmt.Errorf(
+			"bad-environment liveness verification failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog application remains alive",
+	)
+
+	fmt.Fprintln(
+		out,
+		"Waiting for PostgreSQL readiness to fail...",
+	)
+
+	/*
+		A readiness failure does not have to return a specific HTTP
+		status. With an unreachable database target, /readyz may
+		return non-2xx or the request may time out.
+
+		Either result proves that readiness is not successful.
+	*/
+	if err := platform.WaitForHTTPFailure(
+		"http://localhost:8081/readyz",
+		15*time.Second,
+	); err != nil {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+
+		if healthErr := client.WaitForHealthy(
+			"catalog-service",
+			30*time.Second,
+		); healthErr == nil {
+			_ = state.Clear(root)
+		}
+
+		return fmt.Errorf(
+			"bad-environment readiness verification failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ PostgreSQL readiness failure verified",
+	)
+
+	running, err = client.IsRunning("catalog-service")
+	if err != nil {
+		return err
+	}
+
+	if !running {
+		return fmt.Errorf(
+			"bad-environment verification failed: catalog-service stopped",
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog remains running while dependency readiness fails",
 	)
 
 	fmt.Fprintln(out)

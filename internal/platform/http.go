@@ -7,13 +7,50 @@ import (
 )
 
 // WaitForHTTPUnavailable waits until an HTTP endpoint can no longer be reached.
-// It is used by scenarios where the container should remain running while the
-// application inside it is unavailable.
 func WaitForHTTPUnavailable(url string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	client := &http.Client{
-		Timeout: 2 * time.Second,
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err != nil {
+			return nil
+		}
+		_ = resp.Body.Close()
+		time.Sleep(500 * time.Millisecond)
 	}
+
+	return fmt.Errorf("%s remained reachable within %s", url, timeout)
+}
+
+// WaitForHTTPStatus waits until an endpoint returns the expected HTTP status.
+func WaitForHTTPStatus(url string, expected int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 2 * time.Second}
+	var lastStatus int
+
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			lastStatus = resp.StatusCode
+			_ = resp.Body.Close()
+			if resp.StatusCode == expected {
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return fmt.Errorf("%s did not return HTTP %d within %s; last status: %d",
+		url, expected, timeout, lastStatus)
+}
+
+// WaitForHTTPFailure waits until an endpoint is no longer successful.
+// A non-2xx response or a request error/timeout both count as failure.
+func WaitForHTTPFailure(url string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 2 * time.Second}
+	var lastStatus int
 
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url)
@@ -21,13 +58,16 @@ func WaitForHTTPUnavailable(url string, timeout time.Duration) error {
 			return nil
 		}
 
+		lastStatus = resp.StatusCode
 		_ = resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil
+		}
+
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	return fmt.Errorf(
-		"%s remained reachable within %s",
-		url,
-		timeout,
-	)
+	return fmt.Errorf("%s remained successful within %s; last status: %d",
+		url, timeout, lastStatus)
 }
