@@ -63,6 +63,18 @@ const dependencyNotReadyOverride = `services:
         exec docker-entrypoint.sh postgres
 `
 
+const diskGrowthOverride = `services:
+  catalog-service:
+    environment:
+      PLATFORM_LAB_DISK_GROWTH: "true"
+`
+
+const cpuPressureOverride = `services:
+  catalog-service:
+    environment:
+      PLATFORM_LAB_CPU_PRESSURE: "true"
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -144,6 +156,22 @@ var startCmd = &cobra.Command{
 
 		case "lost-persistence":
 			return startLostPersistence(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "disk-growth":
+			return startDiskGrowth(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "cpu-pressure":
+			return startCPUPressure(
 				out,
 				root,
 				client,
@@ -1151,6 +1179,216 @@ func startDependencyNotReady(
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Incident observed and dependency recovery verified. Run lab reset to restore the baseline configuration.")
+	return nil
+}
+
+func startDiskGrowth(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("catalog-service is not running; start Platform Lab before starting this scenario")
+	}
+
+	health, err := client.HealthStatus("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog health: %w", err)
+	}
+	if health != "healthy" {
+		return fmt.Errorf("catalog-service is not healthy before scenario start; current health: %s", health)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("Catalog readiness baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ Catalog baseline is running, healthy, and ready")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+		if err := client.WaitForHealthy("catalog-service", 30*time.Second); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(root, diskGrowthOverride); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Controlled disk-growth behavior prepared")
+
+	if err := client.RecreateWithOverride("catalog-service"); err != nil {
+		rollback()
+		return err
+	}
+	if err := client.WaitForHealthy("catalog-service", 30*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("disk-growth Catalog startup failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog recreated with disk-growth incident armed")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("disk-growth readiness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog remains healthy and ready")
+
+	// Verify that the scenario flag reached the container, but deliberately
+	// do not generate workload here. Lesson 38 begins with a clean storage
+	// baseline; the student must correlate later growth with controlled
+	// application requests.
+	if err := client.Exec(
+		"catalog-service",
+		"sh",
+		"-c",
+		`test "$PLATFORM_LAB_DISK_GROWTH" = "true"`,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("disk-growth verification failed: controlled behavior was not armed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Controlled workload trigger is armed")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Capture a storage baseline, then generate controlled Catalog workload.")
+	fmt.Fprintln(out, "Run lab reset when the investigation is complete.")
+	return nil
+}
+
+func startCPUPressure(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("catalog-service is not running; start Platform Lab before starting this scenario")
+	}
+
+	health, err := client.HealthStatus("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog health: %w", err)
+	}
+	if health != "healthy" {
+		return fmt.Errorf("catalog-service is not healthy before scenario start; current health: %s", health)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("Catalog readiness baseline verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog baseline is running, healthy, and ready")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+		if err := client.WaitForHealthy("catalog-service", 30*time.Second); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(root, cpuPressureOverride); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Controlled CPU-pressure behavior prepared")
+
+	if err := client.RecreateWithOverride("catalog-service"); err != nil {
+		rollback()
+		return err
+	}
+	if err := client.WaitForHealthy("catalog-service", 30*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("cpu-pressure Catalog startup failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog recreated with CPU-pressure incident armed")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("cpu-pressure readiness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog remains healthy and ready")
+
+	// Verify only that the hook is armed. Do not generate workload here:
+	// Lesson 39 must begin with a clean pre-load CPU baseline.
+	if err := client.Exec(
+		"catalog-service",
+		"sh",
+		"-c",
+		`test "$PLATFORM_LAB_CPU_PRESSURE" = "true"`,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("cpu-pressure verification failed: controlled behavior was not armed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Controlled workload trigger is armed")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Capture a CPU baseline, then generate controlled Catalog workload.")
+	fmt.Fprintln(out, "Keep docker stats visible while the workload runs.")
+	fmt.Fprintln(out, "Run lab reset when the investigation is complete.")
 	return nil
 }
 

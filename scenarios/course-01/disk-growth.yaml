@@ -1,0 +1,41 @@
+id: disk-growth
+name: Disk Usage Keeps Growing
+description: >
+  Keeps Platform Lab operational while Catalog generates bounded,
+  deterministic writable-layer growth. The incident is designed for
+  investigation with host and Docker storage evidence before cleanup.
+
+course: 1
+lesson: 38
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - catalog-service
+
+inject:
+  - type: disk_growth
+    target: catalog-service
+
+verify_failure:
+  - type: service_state
+    target: catalog-service
+    expected: running
+  - type: service_health
+    target: catalog-service
+    expected: healthy
+  - type: storage_trend
+    target: catalog-service
+    expected: growing
+
+rollback:
+  - type: restore_compose_baseline
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy

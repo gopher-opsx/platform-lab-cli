@@ -1,0 +1,43 @@
+id: cpu-pressure
+name: Container CPU Goes High
+description: >
+  Keeps Platform Lab operational while controlled Catalog workload triggers
+  bounded CPU-intensive processing. The incident is designed to correlate
+  application workload with container CPU usage and request latency.
+
+course: 1
+lesson: 39
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - catalog-service
+
+inject:
+  - type: cpu_pressure
+    target: catalog-service
+
+verify_failure:
+  - type: service_state
+    target: catalog-service
+    expected: running
+
+  - type: service_health
+    target: catalog-service
+    expected: healthy
+
+  - type: cpu_behavior
+    target: catalog-service
+    expected: workload_driven
+
+rollback:
+  - type: restore_compose_baseline
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy
