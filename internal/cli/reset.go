@@ -95,6 +95,7 @@ var resetCmd = &cobra.Command{
 				); err != nil {
 					return err
 				}
+
 			}
 		}
 

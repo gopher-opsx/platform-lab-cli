@@ -36,6 +36,16 @@ const badEnvironmentOverride = `services:
       DATABASE_URL: "postgres://platform:platform@wrong-postgres:5432/catalog_db?sslmode=disable"
 `
 
+const dnsFailureOverride = `services:
+  catalog-service:
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        printf 'nameserver 192.0.2.1\\noptions ndots:0\\n' > /etc/resolv.conf
+        exec /service
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -85,6 +95,14 @@ var startCmd = &cobra.Command{
 
 		case "bad-environment":
 			return startBadEnvironment(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "dns-failure":
+			return startDNSFailure(
 				out,
 				root,
 				client,
@@ -742,6 +760,114 @@ func startBadEnvironment(
 		"Incident active. Begin troubleshooting from the customer symptom.",
 	)
 
+	return nil
+}
+
+func startDNSFailure(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("catalog-service is not running; start Platform Lab before starting this scenario")
+	}
+
+	health, err := client.HealthStatus("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog health: %w", err)
+	}
+	if health != "healthy" {
+		return fmt.Errorf("catalog-service is not healthy before scenario start; current health: %s", health)
+	}
+
+	postgresRunning, err := client.IsRunning("postgres")
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL state: %w", err)
+	}
+	if !postgresRunning {
+		return fmt.Errorf("postgres is not running; start Platform Lab before starting this scenario")
+	}
+
+	fmt.Fprintln(out, "✓ Catalog and PostgreSQL baseline are running")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:   "compose_override",
+				Target: "catalog-service",
+				File:   compose.OverridePath(root),
+			},
+		},
+	}
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+		if err := client.WaitForHealthy("catalog-service", 30*time.Second); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(root, dnsFailureOverride); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Controlled DNS failure prepared")
+
+	if err := client.RecreateWithOverride("catalog-service"); err != nil {
+		rollback()
+		return err
+	}
+	fmt.Fprintln(out, "✓ Catalog recreated with DNS failure active")
+
+	running, err = client.IsRunning("catalog-service")
+	if err != nil {
+		rollback()
+		return err
+	}
+	if !running {
+		rollback()
+		return fmt.Errorf("dns-failure verification failed: catalog-service stopped")
+	}
+	fmt.Fprintln(out, "✓ Catalog container remains running")
+
+	fmt.Fprintln(out, "Waiting for Catalog application to become live...")
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/healthz",
+		http.StatusOK,
+		15*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("dns-failure liveness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog application remains alive")
+
+	fmt.Fprintln(out, "Waiting for PostgreSQL readiness to fail...")
+	if err := platform.WaitForHTTPFailure(
+		"http://localhost:8081/readyz",
+		15*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("dns-failure readiness verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ PostgreSQL readiness failure verified")
+	fmt.Fprintln(out, "✓ DATABASE_URL remains configured for postgres:5432")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Begin troubleshooting from the customer symptom.")
 	return nil
 }
 
