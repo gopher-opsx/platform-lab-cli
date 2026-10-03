@@ -12,4 +12,5 @@ type Change struct {
 	Type          string `json:"type"`
 	Target        string `json:"target"`
 	OriginalState string `json:"original_state,omitempty"`
+	File          string `json:"file,omitempty"`
 }

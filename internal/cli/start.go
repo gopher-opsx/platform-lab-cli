@@ -6,9 +6,17 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gopher-opsx/platform-lab-cli/internal/compose"
 	"github.com/gopher-opsx/platform-lab-cli/internal/scenario"
 	"github.com/gopher-opsx/platform-lab-cli/internal/state"
 )
+
+const restartLoopOverride = `services:
+  catalog-service:
+    restart: always
+    environment:
+      DATABASE_URL: "not-a-valid-postgres-url"
+`
 
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
@@ -18,7 +26,6 @@ var startCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scenarioID := args[0]
 
-		// Make sure the scenario exists.
 		s, err := scenario.Load(scenarioID)
 		if err != nil {
 			return err
@@ -35,77 +42,29 @@ var startCmd = &cobra.Command{
 
 		out := cmd.OutOrStdout()
 
-		fmt.Fprintf(out, "Starting scenario: %s\n", s.Name)
-		fmt.Fprintln(out)
+		fmt.Fprintf(
+			out,
+			"Starting scenario: %s\n\n",
+			s.Name,
+		)
 
 		switch s.ID {
 
-		case "redis-down":
-
-			running, err := client.IsRunning("redis")
-			if err != nil {
-				return fmt.Errorf(
-					"inspect Redis state: %w",
-					err,
-				)
-			}
-
-			if !running {
-				return fmt.Errorf(
-					"Redis is not running; scenario was not started",
-				)
-			}
-
-			fmt.Fprintln(out, "✓ Redis is running")
-
-			session := state.Session{
-				Scenario:  s.ID,
-				StartedAt: time.Now(),
-				Changes: []state.Change{
-					{
-						Type:          "service_state",
-						Target:        "redis",
-						OriginalState: "running",
-					},
-				},
-			}
-
-			// Save recovery information BEFORE making the change.
-			if err := state.Save(root, session); err != nil {
-				return err
-			}
-
-			fmt.Fprintln(out, "✓ Recovery state recorded")
-
-			if err := client.Stop("redis"); err != nil {
-				// Injection failed, so remove the unused state file.
-				_ = state.Clear(root)
-
-				return err
-			}
-
-			fmt.Fprintln(out, "✓ Scenario activated")
-
-			running, err = client.IsRunning("redis")
-			if err != nil {
-				return err
-			}
-
-			if running {
-				return fmt.Errorf(
-					"scenario verification failed: Redis is still running",
-				)
-			}
-
-			fmt.Fprintln(out, "✓ Incident verified")
-
-			fmt.Fprintln(out)
-			fmt.Fprintln(
+		case "restart-loop":
+			return startRestartLoop(
 				out,
-				"Begin troubleshooting from the customer symptom.",
+				root,
+				client,
+				s.ID,
 			)
 
-			return nil
+		case "redis-down":
+			return startRedisDown(
+				out,
+				root,
+				client,
+				s.ID,
+			)
 
 		default:
 			return fmt.Errorf(
@@ -114,6 +73,165 @@ var startCmd = &cobra.Command{
 			)
 		}
 	},
+}
+
+func startRestartLoop(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf(
+			"inspect Catalog state: %w",
+			err,
+		)
+	}
+
+	if !running {
+		return fmt.Errorf(
+			"catalog-service is not running; start Platform Lab before starting this scenario",
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Catalog is running")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          ".lab/compose.override.yaml",
+			},
+		},
+	}
+
+	/*
+		Save recovery information before changing
+		the running environment.
+	*/
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	if err := compose.WriteOverride(
+		root,
+		restartLoopOverride,
+	); err != nil {
+
+		_ = state.Clear(root)
+
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Failure configuration prepared")
+
+	if err := client.RecreateWithOverride(
+		"catalog-service",
+	); err != nil {
+
+		_ = compose.RemoveOverride(root)
+		_ = state.Clear(root)
+
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Catalog failure injected")
+
+	/*
+		Do not claim that we've diagnosed the incident.
+
+		The student should investigate the restart behavior,
+		container state and logs themselves.
+	*/
+	fmt.Fprintln(out)
+	fmt.Fprintln(
+		out,
+		"Incident active. Begin troubleshooting from the customer symptom.",
+	)
+
+	return nil
+}
+
+func startRedisDown(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+
+	running, err := client.IsRunning("redis")
+	if err != nil {
+		return fmt.Errorf(
+			"inspect Redis state: %w",
+			err,
+		)
+	}
+
+	if !running {
+		return fmt.Errorf(
+			"Redis is not running; scenario was not started",
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Redis is running")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "service_state",
+				Target:        "redis",
+				OriginalState: "running",
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	if err := client.Stop("redis"); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Scenario activated")
+
+	running, err = client.IsRunning("redis")
+	if err != nil {
+		return err
+	}
+
+	if running {
+		return fmt.Errorf(
+			"scenario verification failed: Redis is still running",
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Incident verified")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(
+		out,
+		"Begin troubleshooting from the customer symptom.",
+	)
+
+	return nil
 }
 
 func init() {

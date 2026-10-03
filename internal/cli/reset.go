@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gopher-opsx/platform-lab-cli/internal/compose"
 	"github.com/gopher-opsx/platform-lab-cli/internal/state"
 )
 
@@ -36,13 +37,10 @@ var resetCmd = &cobra.Command{
 
 		fmt.Fprintf(
 			out,
-			"Resetting scenario: %s\n",
+			"Resetting scenario: %s\n\n",
 			session.Scenario,
 		)
 
-		fmt.Fprintln(out)
-
-		// Restore changes in reverse order.
 		for i := len(session.Changes) - 1; i >= 0; i-- {
 			change := session.Changes[i]
 
@@ -50,39 +48,59 @@ var resetCmd = &cobra.Command{
 
 			case "service_state":
 
-				if change.OriginalState == "running" {
-					fmt.Fprintf(
-						out,
-						"Restoring %s...\n",
+				if change.OriginalState != "running" {
+					continue
+				}
+
+				fmt.Fprintf(
+					out,
+					"Restoring %s...\n",
+					change.Target,
+				)
+
+				if err := client.Start(
+					change.Target,
+				); err != nil {
+					return err
+				}
+
+				running, err := client.IsRunning(
+					change.Target,
+				)
+				if err != nil {
+					return err
+				}
+
+				if !running {
+					return fmt.Errorf(
+						"failed to restore %s",
 						change.Target,
 					)
+				}
 
-					if err := client.Start(change.Target); err != nil {
-						return err
-					}
+				fmt.Fprintf(
+					out,
+					"✓ %s restored\n",
+					change.Target,
+				)
 
-					running, err := client.IsRunning(change.Target)
-					if err != nil {
-						return err
-					}
+			case "compose_override":
 
-					if !running {
-						return fmt.Errorf(
-							"failed to restore %s",
-							change.Target,
-						)
-					}
-
-					fmt.Fprintf(
-						out,
-						"✓ %s restored\n",
-						change.Target,
-					)
+				if err := resetComposeOverride(
+					out,
+					root,
+					client,
+					change.Target,
+				); err != nil {
+					return err
 				}
 			}
 		}
 
-		// Only remove recovery information after restoration succeeds.
+		/*
+			State is removed only after all rollback
+			operations succeed.
+		*/
 		if err := state.Clear(root); err != nil {
 			return err
 		}
@@ -90,11 +108,61 @@ var resetCmd = &cobra.Command{
 		fmt.Fprintln(out)
 		fmt.Fprintln(
 			out,
-			"✓ Platform Lab restored.",
+			"✓ Lab changes removed.",
 		)
 
 		return nil
 	},
+}
+
+func resetComposeOverride(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	service string,
+) error {
+
+	fmt.Fprintf(
+		out,
+		"Removing injected configuration from %s...\n",
+		service,
+	)
+
+	/*
+		First remove the Lab-owned override.
+
+		Then recreate the service using only the normal
+		Platform Lab Compose configuration.
+	*/
+	if err := compose.RemoveOverride(root); err != nil {
+		return err
+	}
+
+	if err := client.RecreateBaseline(service); err != nil {
+		return err
+	}
+
+	running, err := client.IsRunning(service)
+	if err != nil {
+		return err
+	}
+
+	if !running {
+		return fmt.Errorf(
+			"%s did not return to running state",
+			service,
+		)
+	}
+
+	fmt.Fprintf(
+		out,
+		"✓ %s baseline configuration restored\n",
+		service,
+	)
+
+	return nil
 }
 
 func init() {
