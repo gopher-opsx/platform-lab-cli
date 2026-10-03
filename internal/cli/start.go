@@ -52,6 +52,17 @@ const portFailureOverride = `services:
       - "18080:8080"
 `
 
+const dependencyNotReadyOverride = `services:
+  postgres:
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Lab: PostgreSQL dependency is temporarily not ready"
+        sleep 20
+        exec docker-entrypoint.sh postgres
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -117,6 +128,14 @@ var startCmd = &cobra.Command{
 
 		case "port-failure":
 			return startPortFailure(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "dependency-not-ready":
+			return startDependencyNotReady(
 				out,
 				root,
 				client,
@@ -993,6 +1012,137 @@ func startPortFailure(
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Incident active. Begin troubleshooting from the customer symptom.")
+	return nil
+}
+
+func startDependencyNotReady(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	postgresRunning, err := client.IsRunning("postgres")
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL state: %w", err)
+	}
+	if !postgresRunning {
+		return fmt.Errorf("postgres is not running; start Platform Lab before starting this scenario")
+	}
+
+	postgresHealth, err := client.HealthStatus("postgres")
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL health: %w", err)
+	}
+	if postgresHealth != "healthy" {
+		return fmt.Errorf("postgres is not healthy before scenario start; current health: %s", postgresHealth)
+	}
+
+	catalogRunning, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !catalogRunning {
+		return fmt.Errorf("catalog-service is not running; start Platform Lab before starting this scenario")
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("Catalog readiness baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ Catalog and PostgreSQL baseline are healthy and ready")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "postgres",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("postgres")
+		if err := client.WaitForHealthy("postgres", 30*time.Second); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(root, dependencyNotReadyOverride); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Controlled PostgreSQL readiness delay prepared")
+
+	if err := client.RecreateWithOverride("postgres"); err != nil {
+		rollback()
+		return err
+	}
+	fmt.Fprintln(out, "✓ PostgreSQL recreated with delayed application startup")
+
+	postgresRunning, err = client.IsRunning("postgres")
+	if err != nil {
+		rollback()
+		return err
+	}
+	if !postgresRunning {
+		rollback()
+		return fmt.Errorf("dependency-not-ready verification failed: postgres container stopped")
+	}
+	fmt.Fprintln(out, "✓ PostgreSQL container is running")
+
+	if err := platform.WaitForHTTPFailure(
+		"http://localhost:8081/readyz",
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("dependency-not-ready verification failed: Catalog did not become not-ready: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog readiness fails while PostgreSQL is not ready")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/healthz",
+		http.StatusOK,
+		5*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("dependency-not-ready verification failed: Catalog application is not alive: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog application remains alive")
+
+	fmt.Fprintln(out, "Waiting for PostgreSQL to become ready...")
+	if err := client.WaitForHealthy("postgres", 40*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("PostgreSQL did not recover from the controlled readiness delay: %w", err)
+	}
+	fmt.Fprintln(out, "✓ PostgreSQL became healthy")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		15*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("Catalog readiness did not recover after PostgreSQL became ready: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog readiness recovered without changing Catalog configuration")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident observed and dependency recovery verified. Run lab reset to restore the baseline configuration.")
 	return nil
 }
 

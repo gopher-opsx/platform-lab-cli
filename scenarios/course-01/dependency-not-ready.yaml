@@ -1,0 +1,44 @@
+id: dependency-not-ready
+name: PostgreSQL Dependency Not Ready
+description: >
+  Keeps the PostgreSQL container running while delaying PostgreSQL startup,
+  creating a temporary window where Catalog is alive but not ready.
+
+course: 1
+lesson: 36
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - postgres
+    - catalog-service
+
+inject:
+  - type: dependency_not_ready
+    target: postgres
+
+verify_failure:
+  - type: service_state
+    target: postgres
+    expected: running
+  - type: application_health
+    target: catalog-service
+    expected: alive
+  - type: dependency_readiness
+    target: catalog-service
+    expected: not_ready
+
+rollback:
+  - type: restore_compose_baseline
+    target: postgres
+
+verify_recovery:
+  - type: service_health
+    target: postgres
+    expected: healthy
+  - type: dependency_readiness
+    target: catalog-service
+    expected: ready
