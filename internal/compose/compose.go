@@ -215,3 +215,52 @@ func (c Client) WaitForHealthy(
 		timeout,
 	)
 }
+
+func (c Client) WaitForHealthStatus(
+	service string,
+	expected string,
+	timeout time.Duration,
+) error {
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		health, err := c.HealthStatus(service)
+
+		if err == nil && health == expected {
+			return nil
+		}
+
+		time.Sleep(time.Second)
+	}
+
+	health, _ := c.HealthStatus(service)
+
+	return fmt.Errorf(
+		"%s did not reach health status %q within %s; current status: %q",
+		service,
+		expected,
+		timeout,
+		health,
+	)
+}
+
+func (c Client) Exec(
+	service string,
+	args ...string,
+) error {
+	composeArgs := c.args(
+		append(
+			[]string{"exec", "-T", service},
+			args...,
+		)...,
+	)
+
+	_, err := runner.Run(
+		c.Root,
+		"docker",
+		composeArgs...,
+	)
+
+	return err
+}

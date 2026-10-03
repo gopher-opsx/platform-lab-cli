@@ -1,0 +1,38 @@
+id: running-but-dead
+name: Container Running but Application Dead
+description: >
+  Keeps the Catalog container running while preventing the
+  Catalog application process from starting.
+
+course: 1
+lesson: 32
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - postgres
+    - catalog-service
+
+inject:
+  - type: apply_running_but_dead
+    target: catalog-service
+
+verify_failure:
+  - type: service_state
+    target: catalog-service
+    expected: running
+  - type: service_health
+    target: catalog-service
+    expected: unhealthy
+
+rollback:
+  - type: restore_service
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy
