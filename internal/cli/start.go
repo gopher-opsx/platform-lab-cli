@@ -75,6 +75,12 @@ const cpuPressureOverride = `services:
       PLATFORM_LAB_CPU_PRESSURE: "true"
 `
 
+const memoryGrowthOverride = `services:
+  catalog-service:
+    environment:
+      PLATFORM_LAB_MEMORY_GROWTH: "true"
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -172,6 +178,14 @@ var startCmd = &cobra.Command{
 
 		case "cpu-pressure":
 			return startCPUPressure(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "memory-growth":
+			return startMemoryGrowth(
 				out,
 				root,
 				client,
@@ -1389,6 +1403,181 @@ func startCPUPressure(
 	fmt.Fprintln(out, "Incident active. Capture a CPU baseline, then generate controlled Catalog workload.")
 	fmt.Fprintln(out, "Keep docker stats visible while the workload runs.")
 	fmt.Fprintln(out, "Run lab reset when the investigation is complete.")
+	return nil
+}
+
+func startMemoryGrowth(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("catalog-service is not running; start Platform Lab before starting this scenario")
+	}
+
+	health, err := client.HealthStatus("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog health: %w", err)
+	}
+	if health != "healthy" {
+		return fmt.Errorf(
+			"catalog-service is not healthy before scenario start; current health: %s",
+			health,
+		)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf(
+			"Catalog readiness baseline verification failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog baseline is running, healthy, and ready",
+	)
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+
+		if err := client.WaitForHealthy(
+			"catalog-service",
+			30*time.Second,
+		); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(
+		root,
+		memoryGrowthOverride,
+	); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Controlled memory-growth behavior prepared",
+	)
+
+	if err := client.RecreateWithOverride(
+		"catalog-service",
+	); err != nil {
+		rollback()
+		return err
+	}
+
+	if err := client.WaitForHealthy(
+		"catalog-service",
+		30*time.Second,
+	); err != nil {
+		rollback()
+
+		return fmt.Errorf(
+			"memory-growth Catalog startup failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog recreated with memory-growth incident armed",
+	)
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+
+		return fmt.Errorf(
+			"memory-growth readiness verification failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog remains healthy and ready",
+	)
+
+	/*
+		Verify only that the controlled memory-growth hook
+		reached the container.
+
+		Do not generate workload here.
+
+		Lesson 40 must begin with a clean memory baseline so
+		the student can correlate later memory growth with
+		controlled application requests.
+	*/
+	if err := client.Exec(
+		"catalog-service",
+		"sh",
+		"-c",
+		`test "$PLATFORM_LAB_MEMORY_GROWTH" = "true"`,
+	); err != nil {
+		rollback()
+
+		return fmt.Errorf(
+			"memory-growth verification failed: controlled behavior was not armed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Controlled workload trigger is armed",
+	)
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(
+		out,
+		"Incident active. Capture a memory baseline, then generate controlled Catalog workload.",
+	)
+	fmt.Fprintln(
+		out,
+		"Repeat the workload and compare memory usage between runs.",
+	)
+	fmt.Fprintln(
+		out,
+		"Run lab reset when the investigation is complete.",
+	)
+
 	return nil
 }
 

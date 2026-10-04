@@ -1,0 +1,43 @@
+id: memory-growth
+name: Container Memory Keeps Growing
+description: >
+  Keeps Platform Lab operational while controlled Catalog workload causes
+  bounded retained-memory growth. The incident is designed to correlate
+  application workload with increasing container memory usage.
+
+course: 1
+lesson: 40
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - catalog-service
+
+inject:
+  - type: memory_growth
+    target: catalog-service
+
+verify_failure:
+  - type: service_state
+    target: catalog-service
+    expected: running
+
+  - type: service_health
+    target: catalog-service
+    expected: healthy
+
+  - type: memory_behavior
+    target: catalog-service
+    expected: workload_driven_growth
+
+rollback:
+  - type: restore_compose_baseline
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy
