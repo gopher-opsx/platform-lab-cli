@@ -259,6 +259,14 @@ var startCmd = &cobra.Command{
 				s.ID,
 			)
 
+		case "kafka-consumer-stops":
+			return startKafkaConsumerStops(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
 		default:
 			return fmt.Errorf(
 				"scenario %q is defined but not implemented yet",
@@ -2839,6 +2847,216 @@ func startKafkaDown(
 	fmt.Fprintln(out, "Incident active. Create an order and follow the asynchronous event path.")
 	fmt.Fprintln(out, "The initial order request may succeed because Order uses a transactional outbox.")
 	fmt.Fprintln(out, "Inspect Order logs and the downstream workflow rather than trusting the HTTP response alone.")
+
+	return nil
+}
+
+func startKafkaConsumerStops(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	const (
+		kafkaService        = "kafka"
+		orderService        = "order-service"
+		inventoryService    = "inventory-service"
+		paymentService      = "payment-service"
+		notificationService = "notification-service"
+	)
+
+	// Lesson 47 starts from a healthy event path. Kafka, the producer, and all
+	// downstream consumers must therefore be healthy before Inventory is stopped.
+	for _, service := range []string{
+		kafkaService,
+		orderService,
+		inventoryService,
+		paymentService,
+		notificationService,
+	} {
+		running, err := client.IsRunning(service)
+		if err != nil {
+			return fmt.Errorf("inspect %s state: %w", service, err)
+		}
+		if !running {
+			return fmt.Errorf("%s is not running; start Platform Lab before starting this scenario", service)
+		}
+
+		health, err := client.HealthStatus(service)
+		if err != nil {
+			return fmt.Errorf("inspect %s health: %w", service, err)
+		}
+		if health != "healthy" {
+			return fmt.Errorf("%s is not healthy before scenario start; current health: %s", service, health)
+		}
+	}
+
+	// Customer-facing HTTP paths should work before the consumer-side failure is
+	// injected. No order is created here: the student's controlled order is the
+	// evidence-generating action for this lesson.
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("product path baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/cart",
+		map[string]string{"X-Customer-ID": "lab-lesson-47"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("cart path baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/orders",
+		map[string]string{"X-Customer-ID": "lab-lesson-47"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("order path baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ Kafka, producer, and consumer baseline are healthy")
+	fmt.Fprintln(out, "✓ Product, cart, and order HTTP paths are working")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "service_state",
+				Target:        inventoryService,
+				OriginalState: "running",
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = client.Start(inventoryService)
+		if err := client.WaitForHealthy(inventoryService, 30*time.Second); err != nil {
+			return
+		}
+		_ = state.Clear(root)
+	}
+
+	if err := client.Stop(inventoryService); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Inventory consumer stopped")
+
+	inventoryRunning, err := client.IsRunning(inventoryService)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("verify Inventory state: %w", err)
+	}
+	if inventoryRunning {
+		rollback()
+		return fmt.Errorf("kafka-consumer-stops verification failed: inventory-service is still running")
+	}
+	fmt.Fprintln(out, "✓ Inventory consumer unavailability verified")
+
+	// The broker must remain healthy; otherwise this would merely reproduce
+	// Lesson 46 instead of a consumer-side incident.
+	kafkaRunning, err := client.IsRunning(kafkaService)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("verify Kafka state: %w", err)
+	}
+	if !kafkaRunning {
+		rollback()
+		return fmt.Errorf("kafka-consumer-stops verification failed: kafka stopped unexpectedly")
+	}
+	kafkaHealth, err := client.HealthStatus(kafkaService)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("verify Kafka health: %w", err)
+	}
+	if kafkaHealth != "healthy" {
+		rollback()
+		return fmt.Errorf("kafka-consumer-stops verification failed: kafka health is %s", kafkaHealth)
+	}
+	fmt.Fprintln(out, "✓ Kafka remains healthy")
+
+	// Producer and the later consumers remain alive. The break is specifically at
+	// Inventory, the first consumer of the order-created event.
+	for _, service := range []string{orderService, paymentService, notificationService} {
+		running, err := client.IsRunning(service)
+		if err != nil {
+			rollback()
+			return fmt.Errorf("verify %s state: %w", service, err)
+		}
+		if !running {
+			rollback()
+			return fmt.Errorf("kafka-consumer-stops verification failed: %s stopped", service)
+		}
+
+		health, err := client.HealthStatus(service)
+		if err != nil {
+			rollback()
+			return fmt.Errorf("verify %s health: %w", service, err)
+		}
+		if health != "healthy" {
+			rollback()
+			return fmt.Errorf("kafka-consumer-stops verification failed: %s health is %s", service, health)
+		}
+	}
+	fmt.Fprintln(out, "✓ Order and unaffected downstream services remain healthy")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8083/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-consumer-stops Order readiness verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-consumer-stops product-path verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/cart",
+		map[string]string{"X-Customer-ID": "lab-lesson-47"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-consumer-stops cart-path verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/orders",
+		map[string]string{"X-Customer-ID": "lab-lesson-47"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-consumer-stops order HTTP-path verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Customer-facing HTTP paths remain available")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Create a controlled order and trace it past Kafka.")
+	fmt.Fprintln(out, "Kafka is healthy, but Inventory is unavailable to consume the order event.")
+	fmt.Fprintln(out, "The order may remain pending until Inventory is restored and processes the retained event.")
 
 	return nil
 }

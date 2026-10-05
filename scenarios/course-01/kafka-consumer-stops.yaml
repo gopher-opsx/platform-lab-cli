@@ -1,0 +1,57 @@
+id: kafka-consumer-stops
+
+name: Kafka Consumer Stops
+
+description: >
+  Creates a controlled consumer-side incident where Kafka and the
+  Order producer remain healthy but Inventory stops consuming order
+  events, leaving the asynchronous business workflow incomplete.
+
+course: 1
+lesson: 47
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - kafka
+    - order-service
+    - inventory-service
+    - payment-service
+    - notification-service
+
+inject:
+  - type: stop_service
+    target: inventory-service
+
+verify_failure:
+  - type: service_state
+    target: inventory-service
+    expected: stopped
+
+  - type: service_health
+    target: kafka
+    expected: healthy
+
+  - type: service_health
+    target: order-service
+    expected: healthy
+
+rollback:
+  - type: restore_service_state
+    target: inventory-service
+
+verify_recovery:
+  - type: service_health
+    target: inventory-service
+    expected: healthy
+
+  - type: service_health
+    target: kafka
+    expected: healthy
+
+  - type: service_health
+    target: order-service
+    expected: healthy

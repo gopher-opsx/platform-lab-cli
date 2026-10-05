@@ -197,6 +197,60 @@ var resetCmd = &cobra.Command{
 			fmt.Fprintln(out, "✓ Repeat the same order workflow and verify consumer processing")
 		}
 
+		if session.Scenario == "kafka-consumer-stops" {
+			fmt.Fprintln(out, "Verifying Kafka consumer recovery...")
+
+			if err := client.WaitForHealthy("inventory-service", 30*time.Second); err != nil {
+				return fmt.Errorf("Inventory was restarted but did not become healthy: %w", err)
+			}
+
+			if err := client.WaitForHealthy("kafka", 20*time.Second); err != nil {
+				return fmt.Errorf("Inventory recovered but Kafka is not healthy: %w", err)
+			}
+
+			for _, service := range []string{
+				"order-service",
+				"payment-service",
+				"notification-service",
+			} {
+				if err := client.WaitForHealthy(service, 20*time.Second); err != nil {
+					return fmt.Errorf("Inventory recovered but %s is not healthy: %w", service, err)
+				}
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8080/api/products",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Inventory recovered but the product path is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatusWithHeaders(
+				"http://localhost:8080/api/cart",
+				map[string]string{"X-Customer-ID": "lab-lesson-47"},
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Inventory recovered but the cart path is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatusWithHeaders(
+				"http://localhost:8080/api/orders",
+				map[string]string{"X-Customer-ID": "lab-lesson-47"},
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Inventory recovered but the Order HTTP path is not healthy: %w", err)
+			}
+
+			fmt.Fprintln(out, "✓ Inventory consumer is healthy again")
+			fmt.Fprintln(out, "✓ Kafka remained healthy")
+			fmt.Fprintln(out, "✓ Order and unaffected downstream services are healthy")
+			fmt.Fprintln(out, "✓ Customer-facing HTTP paths remain healthy")
+			fmt.Fprintln(out, "✓ Check the original pending order: retained Kafka events can now be consumed")
+		}
+
 		if session.Scenario == "postgres-down" {
 			fmt.Fprintln(out, "Verifying PostgreSQL dependency recovery...")
 
