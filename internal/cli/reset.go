@@ -139,6 +139,64 @@ var resetCmd = &cobra.Command{
 			fmt.Fprintln(out, "✓ Cart customer workflow recovered")
 		}
 
+		if session.Scenario == "kafka-down" {
+			fmt.Fprintln(out, "Verifying Kafka dependency recovery...")
+
+			if err := client.WaitForHealthy("kafka", 45*time.Second); err != nil {
+				return fmt.Errorf("Kafka was restarted but did not become healthy: %w", err)
+			}
+
+			for _, service := range []string{
+				"order-service",
+				"inventory-service",
+				"payment-service",
+				"notification-service",
+			} {
+				if err := client.WaitForHealthy(service, 20*time.Second); err != nil {
+					return fmt.Errorf("Kafka recovered but %s is not healthy: %w", service, err)
+				}
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8083/readyz",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Kafka recovered but Order readiness is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8080/api/products",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Kafka recovered but the product path is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatusWithHeaders(
+				"http://localhost:8080/api/cart",
+				map[string]string{"X-Customer-ID": "lab-lesson-46"},
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Kafka recovered but the cart path is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatusWithHeaders(
+				"http://localhost:8080/api/orders",
+				map[string]string{"X-Customer-ID": "lab-lesson-46"},
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Kafka recovered but the Order HTTP path is not healthy: %w", err)
+			}
+
+			fmt.Fprintln(out, "✓ Kafka is healthy")
+			fmt.Fprintln(out, "✓ Order and downstream services are healthy")
+			fmt.Fprintln(out, "✓ Product, cart, and order HTTP paths remain healthy")
+			fmt.Fprintln(out, "✓ Repeat the same order workflow and verify consumer processing")
+		}
+
 		if session.Scenario == "postgres-down" {
 			fmt.Fprintln(out, "Verifying PostgreSQL dependency recovery...")
 

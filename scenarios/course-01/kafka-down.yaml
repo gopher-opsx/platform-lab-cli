@@ -1,0 +1,73 @@
+id: kafka-down
+
+name: Kafka Goes Down
+
+description: >
+  Creates a controlled Kafka availability incident that leaves the
+  Platform Lab HTTP services running while the asynchronous order
+  event path cannot flow through the broker.
+
+course: 1
+lesson: 46
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - kafka
+    - order-service
+    - inventory-service
+    - payment-service
+    - notification-service
+
+inject:
+  - type: stop_service
+    target: kafka
+
+verify_failure:
+  - type: service_state
+    target: kafka
+    expected: stopped
+
+  - type: service_health
+    target: order-service
+    expected: healthy
+
+  - type: service_health
+    target: inventory-service
+    expected: healthy
+
+  - type: service_health
+    target: payment-service
+    expected: healthy
+
+  - type: service_health
+    target: notification-service
+    expected: healthy
+
+rollback:
+  - type: restore_service_state
+    target: kafka
+
+verify_recovery:
+  - type: service_health
+    target: kafka
+    expected: healthy
+
+  - type: service_health
+    target: order-service
+    expected: healthy
+
+  - type: service_health
+    target: inventory-service
+    expected: healthy
+
+  - type: service_health
+    target: payment-service
+    expected: healthy
+
+  - type: service_health
+    target: notification-service
+    expected: healthy

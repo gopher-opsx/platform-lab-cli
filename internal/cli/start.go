@@ -251,6 +251,14 @@ var startCmd = &cobra.Command{
 				s.ID,
 			)
 
+		case "kafka-down":
+			return startKafkaDown(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
 		default:
 			return fmt.Errorf(
 				"scenario %q is defined but not implemented yet",
@@ -2622,6 +2630,215 @@ func startResourceLimits(
 		out,
 		"Run lab reset when the investigation is complete.",
 	)
+
+	return nil
+}
+
+func startKafkaDown(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	const (
+		kafkaService        = "kafka"
+		orderService        = "order-service"
+		inventoryService    = "inventory-service"
+		paymentService      = "payment-service"
+		notificationService = "notification-service"
+	)
+
+	dependentServices := []string{
+		orderService,
+		inventoryService,
+		paymentService,
+		notificationService,
+	}
+
+	// Kafka and every service participating in the event path must be healthy
+	// before the Lab CLI injects the incident. Otherwise the student could be
+	// investigating a pre-existing failure rather than the controlled scenario.
+	for _, service := range append([]string{kafkaService}, dependentServices...) {
+		running, err := client.IsRunning(service)
+		if err != nil {
+			return fmt.Errorf("inspect %s state: %w", service, err)
+		}
+		if !running {
+			return fmt.Errorf("%s is not running; start Platform Lab before starting this scenario", service)
+		}
+
+		health, err := client.HealthStatus(service)
+		if err != nil {
+			return fmt.Errorf("inspect %s health: %w", service, err)
+		}
+		if health != "healthy" {
+			return fmt.Errorf("%s is not healthy before scenario start; current health: %s", service, health)
+		}
+	}
+
+	// Establish the customer-visible baseline. Products and Cart are deliberately
+	// included because Lesson 46 teaches that Kafka failure is scoped to the
+	// asynchronous order path rather than taking down the entire storefront.
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("product path baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/cart",
+		map[string]string{"X-Customer-ID": "lab-lesson-46"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("cart path baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/orders",
+		map[string]string{"X-Customer-ID": "lab-lesson-46"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("order path baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ Kafka and the order event path baseline are healthy")
+	fmt.Fprintln(out, "✓ Product, cart, and order HTTP paths are working")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "service_state",
+				Target:        kafkaService,
+				OriginalState: "running",
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = client.Start(kafkaService)
+
+		if err := client.WaitForHealthy(kafkaService, 45*time.Second); err != nil {
+			return
+		}
+
+		if err := platform.WaitForHTTPStatusWithHeaders(
+			"http://localhost:8080/api/orders",
+			map[string]string{"X-Customer-ID": "lab-lesson-46"},
+			http.StatusOK,
+			20*time.Second,
+		); err != nil {
+			return
+		}
+
+		_ = state.Clear(root)
+	}
+
+	if err := client.Stop(kafkaService); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ Kafka stopped")
+
+	kafkaRunning, err := client.IsRunning(kafkaService)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("verify Kafka state: %w", err)
+	}
+	if kafkaRunning {
+		rollback()
+		return fmt.Errorf("kafka-down verification failed: kafka is still running")
+	}
+	fmt.Fprintln(out, "✓ Kafka unavailability verified")
+
+	// Producer and consumers should remain alive. This is the important shape of
+	// the incident: services are up, but the broker between them is unavailable.
+	for _, service := range dependentServices {
+		running, err := client.IsRunning(service)
+		if err != nil {
+			rollback()
+			return fmt.Errorf("verify %s state: %w", service, err)
+		}
+		if !running {
+			rollback()
+			return fmt.Errorf("kafka-down verification failed: %s stopped", service)
+		}
+	}
+	fmt.Fprintln(out, "✓ Order and downstream service containers remain running")
+
+	for _, endpoint := range []struct {
+		name string
+		url  string
+	}{
+		{name: orderService, url: "http://localhost:8083/healthz"},
+		{name: inventoryService, url: "http://localhost:8084/healthz"},
+		{name: paymentService, url: "http://localhost:8085/healthz"},
+		{name: notificationService, url: "http://localhost:8086/healthz"},
+	} {
+		if err := platform.WaitForHTTPStatus(endpoint.url, http.StatusOK, 10*time.Second); err != nil {
+			rollback()
+			return fmt.Errorf("kafka-down %s liveness verification failed: %w", endpoint.name, err)
+		}
+	}
+	fmt.Fprintln(out, "✓ Producer and consumer processes remain alive")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8083/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-down Order readiness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Order HTTP service remains ready")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-down product-path verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/cart",
+		map[string]string{"X-Customer-ID": "lab-lesson-46"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-down cart-path verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Product and cart workflows still work")
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/orders",
+		map[string]string{"X-Customer-ID": "lab-lesson-46"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("kafka-down order HTTP-path verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Order HTTP path remains available while Kafka is down")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Create an order and follow the asynchronous event path.")
+	fmt.Fprintln(out, "The initial order request may succeed because Order uses a transactional outbox.")
+	fmt.Fprintln(out, "Inspect Order logs and the downstream workflow rather than trusting the HTTP response alone.")
 
 	return nil
 }
