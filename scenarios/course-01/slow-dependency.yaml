@@ -1,0 +1,36 @@
+id: slow-dependency
+name: Application Slow While CPU Looks Fine
+description: >
+  Introduces controlled waiting in the Catalog product request path.
+  Product requests remain successful but become noticeably slower while
+  CPU utilization remains relatively low.
+
+course: 1
+lesson: 42
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - catalog-service
+    - postgres
+
+inject:
+  - type: slow_dependency
+    target: catalog-service
+
+verify_failure:
+  - type: service_health
+    target: catalog-service
+    expected: healthy
+
+rollback:
+  - type: restore_compose_baseline
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy

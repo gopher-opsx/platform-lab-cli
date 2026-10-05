@@ -89,6 +89,12 @@ const oomKillOverride = `services:
     restart: "no"
 `
 
+const slowDependencyOverride = `services:
+  catalog-service:
+    environment:
+      PLATFORM_LAB_SLOW_DEPENDENCY: "true"
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -202,6 +208,14 @@ var startCmd = &cobra.Command{
 
 		case "oom-kill":
 			return startOOMKill(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "slow-dependency":
+			return startSlowDependency(
 				out,
 				root,
 				client,
@@ -1761,6 +1775,204 @@ func startOOMKill(
 	fmt.Fprintln(
 		out,
 		"Investigate the container state after Catalog stops.",
+	)
+	fmt.Fprintln(
+		out,
+		"Run lab reset when the investigation is complete.",
+	)
+
+	return nil
+}
+
+func startSlowDependency(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	// Catalog must be running before we inject the incident.
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !running {
+		return fmt.Errorf(
+			"catalog-service is not running; start Platform Lab before starting this scenario",
+		)
+	}
+
+	// Catalog must start from a known healthy baseline.
+	health, err := client.HealthStatus("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog health: %w", err)
+	}
+	if health != "healthy" {
+		return fmt.Errorf(
+			"catalog-service is not healthy before scenario start; current health: %s",
+			health,
+		)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf(
+			"Catalog readiness baseline verification failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog baseline is running, healthy, and ready",
+	)
+
+	// PostgreSQL must also be healthy. This scenario is about latency,
+	// not an unavailable database.
+	postgresRunning, err := client.IsRunning("postgres")
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL state: %w", err)
+	}
+	if !postgresRunning {
+		return fmt.Errorf(
+			"postgres is not running; start Platform Lab before starting this scenario",
+		)
+	}
+
+	postgresHealth, err := client.HealthStatus("postgres")
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL health: %w", err)
+	}
+	if postgresHealth != "healthy" {
+		return fmt.Errorf(
+			"postgres is not healthy before scenario start; current health: %s",
+			postgresHealth,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ PostgreSQL dependency is healthy",
+	)
+
+	// Record enough information for lab reset to restore the baseline.
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+
+		if err := client.WaitForHealthy(
+			"catalog-service",
+			30*time.Second,
+		); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	// Arm the controlled waiting behavior.
+	if err := compose.WriteOverride(
+		root,
+		slowDependencyOverride,
+	); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Controlled dependency delay prepared",
+	)
+
+	if err := client.RecreateWithOverride(
+		"catalog-service",
+	); err != nil {
+		rollback()
+		return err
+	}
+
+	if err := client.WaitForHealthy(
+		"catalog-service",
+		30*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf(
+			"Catalog did not become healthy after arming slow dependency scenario: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog recreated with slow dependency incident armed",
+	)
+
+	// Verify that the training hook is actually present inside the container.
+	if err := client.Exec(
+		"catalog-service",
+		"sh",
+		"-c",
+		`test "$PLATFORM_LAB_SLOW_DEPENDENCY" = "true"`,
+	); err != nil {
+		rollback()
+		return fmt.Errorf(
+			"verify slow dependency trigger: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Slow-dependency trigger is armed",
+	)
+
+	// The incident must not make Catalog unhealthy.
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf(
+			"Catalog readiness verification failed after arming scenario: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog remains healthy",
+	)
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(
+		out,
+		"Incident active. Generate controlled Catalog workload.",
+	)
+	fmt.Fprintln(
+		out,
+		"Observe request latency and compare it with CPU utilization.",
 	)
 	fmt.Fprintln(
 		out,
