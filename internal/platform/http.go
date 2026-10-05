@@ -25,12 +25,32 @@ func WaitForHTTPUnavailable(url string, timeout time.Duration) error {
 
 // WaitForHTTPStatus waits until an endpoint returns the expected HTTP status.
 func WaitForHTTPStatus(url string, expected int, timeout time.Duration) error {
+	return WaitForHTTPStatusWithHeaders(url, nil, expected, timeout)
+}
+
+// WaitForHTTPStatusWithHeaders waits until an endpoint returns the expected HTTP
+// status while sending the supplied request headers.
+func WaitForHTTPStatusWithHeaders(
+	url string,
+	headers map[string]string,
+	expected int,
+	timeout time.Duration,
+) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 2 * time.Second}
 	var lastStatus int
 
 	for time.Now().Before(deadline) {
-		resp, err := client.Get(url)
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("create request for %s: %w", url, err)
+		}
+
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+
+		resp, err := client.Do(req)
 		if err == nil {
 			lastStatus = resp.StatusCode
 			_ = resp.Body.Close()
@@ -48,12 +68,31 @@ func WaitForHTTPStatus(url string, expected int, timeout time.Duration) error {
 // WaitForHTTPFailure waits until an endpoint is no longer successful.
 // A non-2xx response or a request error/timeout both count as failure.
 func WaitForHTTPFailure(url string, timeout time.Duration) error {
+	return WaitForHTTPFailureWithHeaders(url, nil, timeout)
+}
+
+// WaitForHTTPFailureWithHeaders waits until an endpoint is no longer successful
+// while sending the supplied request headers.
+func WaitForHTTPFailureWithHeaders(
+	url string,
+	headers map[string]string,
+	timeout time.Duration,
+) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 2 * time.Second}
 	var lastStatus int
 
 	for time.Now().Before(deadline) {
-		resp, err := client.Get(url)
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("create request for %s: %w", url, err)
+		}
+
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil
 		}

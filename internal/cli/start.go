@@ -565,22 +565,81 @@ func startRedisDown(
 	client compose.Client,
 	scenarioID string,
 ) error {
+	const (
+		redisService = "redis"
+		cartService  = "cart-service"
+		customerID   = "lab-lesson-45"
+	)
 
-	running, err := client.IsRunning("redis")
+	cartHeaders := map[string]string{
+		"X-Customer-ID": customerID,
+	}
+
+	redisRunning, err := client.IsRunning(redisService)
 	if err != nil {
+		return fmt.Errorf("inspect Redis state: %w", err)
+	}
+	if !redisRunning {
+		return fmt.Errorf("redis is not running; start Platform Lab before starting this scenario")
+	}
+
+	redisHealth, err := client.HealthStatus(redisService)
+	if err != nil {
+		return fmt.Errorf("inspect Redis health: %w", err)
+	}
+	if redisHealth != "healthy" {
 		return fmt.Errorf(
-			"inspect Redis state: %w",
-			err,
+			"redis is not healthy before scenario start; current health: %s",
+			redisHealth,
 		)
 	}
 
-	if !running {
+	cartRunning, err := client.IsRunning(cartService)
+	if err != nil {
+		return fmt.Errorf("inspect Cart state: %w", err)
+	}
+	if !cartRunning {
+		return fmt.Errorf("cart-service is not running; start Platform Lab before starting this scenario")
+	}
+
+	cartHealth, err := client.HealthStatus(cartService)
+	if err != nil {
+		return fmt.Errorf("inspect Cart health: %w", err)
+	}
+	if cartHealth != "healthy" {
 		return fmt.Errorf(
-			"Redis is not running; scenario was not started",
+			"cart-service is not healthy before scenario start; current health: %s",
+			cartHealth,
 		)
 	}
 
-	fmt.Fprintln(out, "✓ Redis is running")
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8082/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("Cart readiness baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("product path baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/cart",
+		cartHeaders,
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("cart workflow baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ Redis and Cart baseline are healthy")
+	fmt.Fprintln(out, "✓ Product and cart customer workflows are working")
 
 	session := state.Session{
 		Scenario:  scenarioID,
@@ -588,7 +647,7 @@ func startRedisDown(
 		Changes: []state.Change{
 			{
 				Type:          "service_state",
-				Target:        "redis",
+				Target:        redisService,
 				OriginalState: "running",
 			},
 		},
@@ -597,34 +656,112 @@ func startRedisDown(
 	if err := state.Save(root, session); err != nil {
 		return err
 	}
-
 	fmt.Fprintln(out, "✓ Recovery state recorded")
 
-	if err := client.Stop("redis"); err != nil {
+	rollback := func() {
+		_ = client.Start(redisService)
+
+		if err := client.WaitForHealthy(redisService, 30*time.Second); err != nil {
+			return
+		}
+
+		if err := platform.WaitForHTTPStatus(
+			"http://localhost:8082/readyz",
+			http.StatusOK,
+			20*time.Second,
+		); err != nil {
+			return
+		}
+
+		if err := platform.WaitForHTTPStatus(
+			"http://localhost:8080/api/products",
+			http.StatusOK,
+			20*time.Second,
+		); err != nil {
+			return
+		}
+
+		if err := platform.WaitForHTTPStatusWithHeaders(
+			"http://localhost:8080/api/cart",
+			cartHeaders,
+			http.StatusOK,
+			20*time.Second,
+		); err != nil {
+			return
+		}
+
+		_ = state.Clear(root)
+	}
+
+	if err := client.Stop(redisService); err != nil {
 		_ = state.Clear(root)
 		return err
 	}
+	fmt.Fprintln(out, "✓ Redis stopped")
 
-	fmt.Fprintln(out, "✓ Scenario activated")
-
-	running, err = client.IsRunning("redis")
+	redisRunning, err = client.IsRunning(redisService)
 	if err != nil {
-		return err
+		rollback()
+		return fmt.Errorf("verify Redis state: %w", err)
 	}
-
-	if running {
-		return fmt.Errorf(
-			"scenario verification failed: Redis is still running",
-		)
+	if redisRunning {
+		rollback()
+		return fmt.Errorf("redis-down verification failed: redis is still running")
 	}
+	fmt.Fprintln(out, "✓ Redis unavailability verified")
 
-	fmt.Fprintln(out, "✓ Incident verified")
+	cartRunning, err = client.IsRunning(cartService)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("verify Cart state: %w", err)
+	}
+	if !cartRunning {
+		rollback()
+		return fmt.Errorf("redis-down verification failed: cart-service stopped")
+	}
+	fmt.Fprintln(out, "✓ Cart container remains running")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8082/healthz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("redis-down Cart liveness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Cart process remains alive")
+
+	if err := platform.WaitForHTTPFailure(
+		"http://localhost:8082/readyz",
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("redis-down Cart readiness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Cart readiness fails because Redis is unavailable")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("redis-down partial-failure verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Product path still works")
+
+	if err := platform.WaitForHTTPFailureWithHeaders(
+		"http://localhost:8080/api/cart",
+		cartHeaders,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("redis-down cart-workflow verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Customer cart workflow failure verified")
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(
-		out,
-		"Begin troubleshooting from the customer symptom.",
-	)
+	fmt.Fprintln(out, "Incident active. Begin troubleshooting from the customer symptom.")
 
 	return nil
 }

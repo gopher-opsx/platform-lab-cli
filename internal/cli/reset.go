@@ -101,6 +101,44 @@ var resetCmd = &cobra.Command{
 			}
 		}
 
+		if session.Scenario == "redis-down" {
+			fmt.Fprintln(out, "Verifying Redis dependency recovery...")
+
+			if err := client.WaitForHealthy("redis", 30*time.Second); err != nil {
+				return fmt.Errorf("Redis was restarted but did not become healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8082/readyz",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Redis recovered but Cart readiness did not recover: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8080/api/products",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Redis recovered but the product path is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatusWithHeaders(
+				"http://localhost:8080/api/cart",
+				map[string]string{"X-Customer-ID": "lab-lesson-45"},
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Redis recovered but the cart workflow did not recover: %w", err)
+			}
+
+			fmt.Fprintln(out, "✓ Redis is healthy")
+			fmt.Fprintln(out, "✓ Cart readiness recovered")
+			fmt.Fprintln(out, "✓ Product path remains healthy")
+			fmt.Fprintln(out, "✓ Cart customer workflow recovered")
+		}
+
 		if session.Scenario == "postgres-down" {
 			fmt.Fprintln(out, "Verifying PostgreSQL dependency recovery...")
 
