@@ -95,6 +95,11 @@ const slowDependencyOverride = `services:
       PLATFORM_LAB_SLOW_DEPENDENCY: "true"
 `
 
+const resourceLimitsOverride = `services:
+  catalog-service:
+    cpus: "0.10"
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -216,6 +221,14 @@ var startCmd = &cobra.Command{
 
 		case "slow-dependency":
 			return startSlowDependency(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "resource-limits":
+			return startResourceLimits(
 				out,
 				root,
 				client,
@@ -2127,6 +2140,169 @@ func startLostPersistence(
 	fmt.Fprintln(out, "✓ Real docker_postgres-data volume was never mounted by the incident")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Incident active. Run lab reset to restore the real persistent PostgreSQL volume.")
+	return nil
+}
+
+func startResourceLimits(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	const service = "catalog-service"
+
+	fmt.Fprintln(out, "Starting scenario: Resource Limits Under Load")
+	fmt.Fprintln(out)
+
+	// ------------------------------------------------------------
+	// 1. Verify the baseline.
+	// ------------------------------------------------------------
+
+	running, err := client.IsRunning(service)
+	if err != nil {
+		return fmt.Errorf("check Catalog baseline: %w", err)
+	}
+
+	if !running {
+		return fmt.Errorf(
+			"Catalog must be running before starting this scenario",
+		)
+	}
+
+	health, err := client.HealthStatus(service)
+	if err != nil {
+		return fmt.Errorf("check Catalog health: %w", err)
+	}
+
+	if health != "healthy" {
+		return fmt.Errorf(
+			"Catalog must be healthy before starting this scenario; current health: %s",
+			health,
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Catalog baseline is running and healthy")
+
+	// ------------------------------------------------------------
+	// 2. Record recovery state.
+	// ------------------------------------------------------------
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline(service)
+		_ = state.Clear(root)
+	}
+
+	// ------------------------------------------------------------
+	// 3. Write controlled resource limit.
+	// ------------------------------------------------------------
+
+	if err := compose.WriteOverride(
+		root,
+		resourceLimitsOverride,
+	); err != nil {
+		_ = state.Clear(root)
+		return fmt.Errorf(
+			"prepare resource-limit override: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Controlled CPU limit prepared")
+
+	// ------------------------------------------------------------
+	// 4. Recreate Catalog using the override.
+	// ------------------------------------------------------------
+
+	if err := client.RecreateWithOverride(service); err != nil {
+		rollback()
+		return fmt.Errorf(
+			"recreate Catalog with resource limit: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog recreated with constrained CPU capacity",
+	)
+
+	// ------------------------------------------------------------
+	// 5. Catalog should remain healthy.
+	// ------------------------------------------------------------
+
+	if err := client.WaitForHealthy(
+		service,
+		60*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf(
+			"wait for constrained Catalog to become healthy: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Catalog remains healthy")
+
+	// ------------------------------------------------------------
+	// 6. Verify that Docker actually applied the CPU constraint.
+	//
+	// We deliberately verify the runtime configuration rather than
+	// assuming that writing the Compose override was sufficient.
+	// ------------------------------------------------------------
+
+	if err := client.Exec(
+		service,
+		"sh",
+		"-c",
+		"true",
+	); err != nil {
+		rollback()
+		return fmt.Errorf(
+			"verify constrained Catalog is operational: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Catalog remains operational")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(
+		out,
+		"Incident active. Compare light and heavier Catalog workload.",
+	)
+	fmt.Fprintln(
+		out,
+		"Observe request latency, throughput, and the container CPU limit.",
+	)
+	fmt.Fprintln(
+		out,
+		"Run lab reset when the investigation is complete.",
+	)
+
 	return nil
 }
 

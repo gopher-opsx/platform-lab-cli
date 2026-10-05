@@ -1,0 +1,36 @@
+id: resource-limits
+name: Resource Limits Under Load
+description: >
+  Applies a controlled CPU limit to the Catalog service. The service remains
+  healthy and continues serving requests, but available CPU capacity is
+  deliberately constrained so that heavier workload can expose the resource
+  limit as an operating boundary.
+
+course: 1
+lesson: 43
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - catalog-service
+
+inject:
+  - type: resource_limits
+    target: catalog-service
+
+verify_failure:
+  - type: service_health
+    target: catalog-service
+    expected: healthy
+
+rollback:
+  - type: restore_compose_baseline
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy
