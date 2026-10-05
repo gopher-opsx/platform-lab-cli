@@ -100,6 +100,12 @@ const resourceLimitsOverride = `services:
     cpus: "0.10"
 `
 
+const cascadingIncidentOverride = `services:
+  payment-service:
+    environment:
+      KAFKA_BROKERS: "missing-kafka-broker:29092"
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -261,6 +267,14 @@ var startCmd = &cobra.Command{
 
 		case "kafka-consumer-stops":
 			return startKafkaConsumerStops(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "cascading-incident":
+			return startCascadingIncident(
 				out,
 				root,
 				client,
@@ -3057,6 +3071,195 @@ func startKafkaConsumerStops(
 	fmt.Fprintln(out, "Incident active. Create a controlled order and trace it past Kafka.")
 	fmt.Fprintln(out, "Kafka is healthy, but Inventory is unavailable to consume the order event.")
 	fmt.Fprintln(out, "The order may remain pending until Inventory is restored and processes the retained event.")
+
+	return nil
+}
+
+func startCascadingIncident(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	const (
+		kafkaService        = "kafka"
+		orderService        = "order-service"
+		inventoryService    = "inventory-service"
+		paymentService      = "payment-service"
+		notificationService = "notification-service"
+	)
+
+	eventPathServices := []string{
+		kafkaService,
+		orderService,
+		inventoryService,
+		paymentService,
+		notificationService,
+	}
+
+	// Lesson 48 begins from a completely healthy platform so that the student can
+	// trust the symptoms that appear after the controlled incident is injected.
+	for _, service := range eventPathServices {
+		running, err := client.IsRunning(service)
+		if err != nil {
+			return fmt.Errorf("inspect %s state: %w", service, err)
+		}
+		if !running {
+			return fmt.Errorf("%s is not running; start Platform Lab before starting this scenario", service)
+		}
+
+		health, err := client.HealthStatus(service)
+		if err != nil {
+			return fmt.Errorf("inspect %s health: %w", service, err)
+		}
+		if health != "healthy" {
+			return fmt.Errorf("%s is not healthy before scenario start; current health: %s", service, health)
+		}
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("product path baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/cart",
+		map[string]string{"X-Customer-ID": "lab-lesson-48"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("cart path baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/orders",
+		map[string]string{"X-Customer-ID": "lab-lesson-48"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("order path baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ Platform baseline is healthy")
+	fmt.Fprintln(out, "✓ Product, cart, and order HTTP paths are working")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:   "compose_override",
+				Target: paymentService,
+				File:   compose.OverridePath(root),
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline(paymentService)
+		if err := client.WaitForHealthy(paymentService, 30*time.Second); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(root, cascadingIncidentOverride); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+
+	if err := client.RecreateWithOverride(paymentService); err != nil {
+		rollback()
+		return err
+	}
+
+	if err := client.WaitForHealthy(paymentService, 30*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("cascading-incident activation failed: payment-service did not become healthy: %w", err)
+	}
+
+	// The incident is deliberately deceptive: the affected Payment process and
+	// its database readiness remain healthy. Its Kafka consumer path is the part
+	// that has been disrupted, so Compose alone should not reveal the answer.
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8085/healthz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("cascading-incident Payment liveness verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8085/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("cascading-incident Payment readiness verification failed: %w", err)
+	}
+
+	if err := client.WaitForHealthy(kafkaService, 15*time.Second); err != nil {
+		rollback()
+		return fmt.Errorf("cascading-incident verification failed: Kafka is not healthy: %w", err)
+	}
+
+	for _, service := range []string{orderService, inventoryService, notificationService} {
+		if err := client.WaitForHealthy(service, 15*time.Second); err != nil {
+			rollback()
+			return fmt.Errorf("cascading-incident verification failed: %s is not healthy: %w", service, err)
+		}
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("cascading-incident product-path verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/cart",
+		map[string]string{"X-Customer-ID": "lab-lesson-48"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("cascading-incident cart-path verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatusWithHeaders(
+		"http://localhost:8080/api/orders",
+		map[string]string{"X-Customer-ID": "lab-lesson-48"},
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("cascading-incident order HTTP-path verification failed: %w", err)
+	}
+
+	// Do not print the failed component or injected value. Lesson 48 is an
+	// investigation exercise: the student should discover the common cause from
+	// customer symptoms, topology, state, and logs.
+	fmt.Fprintln(out, "✓ Controlled major incident activated")
+	fmt.Fprintln(out, "✓ Core customer HTTP paths remain available")
+	fmt.Fprintln(out, "✓ Event-path services still appear healthy at the container level")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Start with the customer workflows and build a symptom map.")
+	fmt.Fprintln(out, "Create a controlled order, then correlate Order, Kafka, Inventory, Payment, and Notification evidence.")
+	fmt.Fprintln(out, "Do not assume that every visible symptom has a separate root cause.")
 
 	return nil
 }

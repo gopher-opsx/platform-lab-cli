@@ -251,6 +251,67 @@ var resetCmd = &cobra.Command{
 			fmt.Fprintln(out, "✓ Check the original pending order: retained Kafka events can now be consumed")
 		}
 
+		if session.Scenario == "cascading-incident" {
+			fmt.Fprintln(out, "Verifying cascading-incident recovery...")
+
+			if err := client.WaitForHealthy("payment-service", 30*time.Second); err != nil {
+				return fmt.Errorf("Payment baseline was restored but did not become healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8085/readyz",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("Payment baseline was restored but readiness did not recover: %w", err)
+			}
+
+			if err := client.WaitForHealthy("kafka", 20*time.Second); err != nil {
+				return fmt.Errorf("Payment baseline recovered but Kafka is not healthy: %w", err)
+			}
+
+			for _, service := range []string{
+				"order-service",
+				"inventory-service",
+				"notification-service",
+			} {
+				if err := client.WaitForHealthy(service, 20*time.Second); err != nil {
+					return fmt.Errorf("cascading-incident recovery incomplete: %s is not healthy: %w", service, err)
+				}
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8080/api/products",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("cascading-incident recovery failed: product path is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatusWithHeaders(
+				"http://localhost:8080/api/cart",
+				map[string]string{"X-Customer-ID": "lab-lesson-48"},
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("cascading-incident recovery failed: cart path is not healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatusWithHeaders(
+				"http://localhost:8080/api/orders",
+				map[string]string{"X-Customer-ID": "lab-lesson-48"},
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("cascading-incident recovery failed: Order HTTP path is not healthy: %w", err)
+			}
+
+			fmt.Fprintln(out, "✓ Event-path configuration restored")
+			fmt.Fprintln(out, "✓ Kafka and downstream services are healthy")
+			fmt.Fprintln(out, "✓ Product, cart, and order HTTP paths remain healthy")
+			fmt.Fprintln(out, "✓ Recheck the original pending order; retained events can now continue through Payment and Notification")
+		}
+
 		if session.Scenario == "postgres-down" {
 			fmt.Fprintln(out, "Verifying PostgreSQL dependency recovery...")
 

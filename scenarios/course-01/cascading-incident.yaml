@@ -1,0 +1,61 @@
+id: cascading-incident
+
+name: Cascading / Partial Major Incident
+
+description: >
+  Creates a controlled multi-symptom order-path incident. Core HTTP workflows
+  and Kafka remain available while one hidden downstream event-path failure
+  prevents the business workflow from completing normally.
+
+course: 1
+lesson: 48
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - kafka
+    - order-service
+    - inventory-service
+    - payment-service
+    - notification-service
+
+inject:
+  - type: activate_cascading_incident
+    target: order-event-path
+
+verify_failure:
+  - type: service_health
+    target: kafka
+    expected: healthy
+
+  - type: service_health
+    target: order-service
+    expected: healthy
+
+  - type: service_health
+    target: inventory-service
+    expected: healthy
+
+  - type: service_health
+    target: payment-service
+    expected: healthy
+
+  - type: service_health
+    target: notification-service
+    expected: healthy
+
+rollback:
+  - type: restore_event_path
+    target: order-event-path
+
+verify_recovery:
+  - type: service_health
+    target: payment-service
+    expected: healthy
+
+  - type: service_health
+    target: kafka
+    expected: healthy
