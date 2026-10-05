@@ -81,6 +81,14 @@ const memoryGrowthOverride = `services:
       PLATFORM_LAB_MEMORY_GROWTH: "true"
 `
 
+const oomKillOverride = `services:
+  catalog-service:
+    environment:
+      PLATFORM_LAB_OOM_PRESSURE: "true"
+    mem_limit: 64m
+    restart: "no"
+`
+
 var startCmd = &cobra.Command{
 	Use:   "start <scenario>",
 	Short: "Start a controlled incident scenario",
@@ -186,6 +194,14 @@ var startCmd = &cobra.Command{
 
 		case "memory-growth":
 			return startMemoryGrowth(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
+		case "oom-kill":
+			return startOOMKill(
 				out,
 				root,
 				client,
@@ -1593,6 +1609,165 @@ volumes:
     external: true
     name: %s
 `, volumeName, volumeName, volumeName)
+}
+
+func startOOMKill(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	running, err := client.IsRunning("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !running {
+		return fmt.Errorf(
+			"catalog-service is not running; start Platform Lab before starting this scenario",
+		)
+	}
+
+	health, err := client.HealthStatus("catalog-service")
+	if err != nil {
+		return fmt.Errorf("inspect Catalog health: %w", err)
+	}
+	if health != "healthy" {
+		return fmt.Errorf(
+			"catalog-service is not healthy before scenario start; current health: %s",
+			health,
+		)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf(
+			"Catalog readiness baseline verification failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog baseline is running, healthy, and ready",
+	)
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "compose_override",
+				Target:        "catalog-service",
+				OriginalState: "running",
+				File:          compose.OverridePath(root),
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = compose.RemoveOverride(root)
+		_ = client.RecreateBaseline("catalog-service")
+
+		if err := client.WaitForHealthy(
+			"catalog-service",
+			30*time.Second,
+		); err == nil {
+			_ = state.Clear(root)
+		}
+	}
+
+	if err := compose.WriteOverride(
+		root,
+		oomKillOverride,
+	); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Controlled memory limit prepared",
+	)
+
+	if err := client.RecreateWithOverride(
+		"catalog-service",
+	); err != nil {
+		rollback()
+		return err
+	}
+
+	if err := client.WaitForHealthy(
+		"catalog-service",
+		30*time.Second,
+	); err != nil {
+		rollback()
+
+		return fmt.Errorf(
+			"OOM-kill Catalog startup failed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(
+		out,
+		"✓ Catalog recreated with OOM incident armed",
+	)
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+
+		return fmt.Errorf(
+			"OOM-kill readiness verification failed: %w",
+			err,
+		)
+	}
+
+	if err := client.Exec(
+		"catalog-service",
+		"sh",
+		"-c",
+		`test "$PLATFORM_LAB_OOM_PRESSURE" = "true"`,
+	); err != nil {
+		rollback()
+
+		return fmt.Errorf(
+			"OOM-kill verification failed: OOM-pressure behavior was not armed: %w",
+			err,
+		)
+	}
+
+	fmt.Fprintln(out, "✓ Controlled OOM-pressure trigger is armed")
+	fmt.Fprintln(out, "✓ Catalog remains healthy before workload")
+	fmt.Fprintln(out)
+	fmt.Fprintln(
+		out,
+		"Incident active. Observe the memory limit, then generate controlled Catalog workload.",
+	)
+	fmt.Fprintln(
+		out,
+		"Investigate the container state after Catalog stops.",
+	)
+	fmt.Fprintln(
+		out,
+		"Run lab reset when the investigation is complete.",
+	)
+
+	return nil
 }
 
 func startLostPersistence(

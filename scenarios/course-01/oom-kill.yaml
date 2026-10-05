@@ -1,0 +1,35 @@
+id: oom-kill
+name: Container Gets OOM Killed
+description: >
+  Applies a controlled memory limit to Catalog and enables the existing
+  workload-driven retained-memory behavior. Repeated Catalog workload
+  eventually exceeds the container memory limit and causes an OOM kill.
+
+course: 1
+lesson: 41
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - catalog-service
+
+inject:
+  - type: oom_kill
+    target: catalog-service
+
+verify_failure:
+  - type: container_oom
+    target: catalog-service
+    expected: true
+
+rollback:
+  - type: restore_compose_baseline
+    target: catalog-service
+
+verify_recovery:
+  - type: service_health
+    target: catalog-service
+    expected: healthy
