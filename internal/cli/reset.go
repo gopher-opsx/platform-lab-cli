@@ -2,11 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/gopher-opsx/platform-lab-cli/internal/compose"
+	"github.com/gopher-opsx/platform-lab-cli/internal/platform"
 	"github.com/gopher-opsx/platform-lab-cli/internal/state"
 )
 
@@ -97,6 +99,34 @@ var resetCmd = &cobra.Command{
 				}
 
 			}
+		}
+
+		if session.Scenario == "postgres-down" {
+			fmt.Fprintln(out, "Verifying PostgreSQL dependency recovery...")
+
+			if err := client.WaitForHealthy("postgres", 30*time.Second); err != nil {
+				return fmt.Errorf("PostgreSQL was restarted but did not become healthy: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8081/readyz",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("PostgreSQL recovered but Catalog readiness did not recover: %w", err)
+			}
+
+			if err := platform.WaitForHTTPStatus(
+				"http://localhost:8080/api/products",
+				http.StatusOK,
+				20*time.Second,
+			); err != nil {
+				return fmt.Errorf("PostgreSQL recovered but the product path did not recover: %w", err)
+			}
+
+			fmt.Fprintln(out, "✓ PostgreSQL is healthy")
+			fmt.Fprintln(out, "✓ Catalog readiness recovered")
+			fmt.Fprintln(out, "✓ Product request recovered")
 		}
 
 		/*

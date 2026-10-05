@@ -1,0 +1,57 @@
+id: postgres-down
+
+name: PostgreSQL Goes Down
+
+description: >
+  Creates a controlled PostgreSQL availability incident affecting
+  the Platform Lab product catalog request path.
+
+course: 1
+lesson: 44
+
+platform:
+  name: platform-lab
+  version: "1"
+
+preflight:
+  require_healthy:
+    - postgres
+    - catalog-service
+
+inject:
+  - type: stop_service
+    target: postgres
+
+verify_failure:
+  - type: service_state
+    target: postgres
+    expected: stopped
+
+  - type: service_state
+    target: catalog-service
+    expected: running
+
+  - type: http_failure
+    target: http://localhost:8081/readyz
+    expected: unavailable
+
+  - type: http_failure
+    target: http://localhost:8080/api/products
+    expected: unavailable
+
+rollback:
+  - type: restore_service_state
+    target: postgres
+
+verify_recovery:
+  - type: service_health
+    target: postgres
+    expected: healthy
+
+  - type: http_status
+    target: http://localhost:8081/readyz
+    expected: "200"
+
+  - type: http_status
+    target: http://localhost:8080/api/products
+    expected: "200"

@@ -235,6 +235,14 @@ var startCmd = &cobra.Command{
 				s.ID,
 			)
 
+		case "postgres-down":
+			return startPostgresDown(
+				out,
+				root,
+				client,
+				s.ID,
+			)
+
 		case "redis-down":
 			return startRedisDown(
 				out,
@@ -370,6 +378,181 @@ func startRestartLoop(
 		out,
 		"Incident active. Begin troubleshooting from the customer symptom.",
 	)
+
+	return nil
+}
+
+func startPostgresDown(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	const (
+		postgresService = "postgres"
+		catalogService  = "catalog-service"
+	)
+
+	postgresRunning, err := client.IsRunning(postgresService)
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL state: %w", err)
+	}
+	if !postgresRunning {
+		return fmt.Errorf("postgres is not running; start Platform Lab before starting this scenario")
+	}
+
+	postgresHealth, err := client.HealthStatus(postgresService)
+	if err != nil {
+		return fmt.Errorf("inspect PostgreSQL health: %w", err)
+	}
+	if postgresHealth != "healthy" {
+		return fmt.Errorf(
+			"postgres is not healthy before scenario start; current health: %s",
+			postgresHealth,
+		)
+	}
+
+	catalogRunning, err := client.IsRunning(catalogService)
+	if err != nil {
+		return fmt.Errorf("inspect Catalog state: %w", err)
+	}
+	if !catalogRunning {
+		return fmt.Errorf("catalog-service is not running; start Platform Lab before starting this scenario")
+	}
+
+	catalogHealth, err := client.HealthStatus(catalogService)
+	if err != nil {
+		return fmt.Errorf("inspect Catalog health: %w", err)
+	}
+	if catalogHealth != "healthy" {
+		return fmt.Errorf(
+			"catalog-service is not healthy before scenario start; current health: %s",
+			catalogHealth,
+		)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/readyz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("Catalog readiness baseline verification failed: %w", err)
+	}
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8080/api/products",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		return fmt.Errorf("product path baseline verification failed: %w", err)
+	}
+
+	fmt.Fprintln(out, "✓ PostgreSQL and Catalog baseline are healthy")
+	fmt.Fprintln(out, "✓ Product request baseline is working")
+
+	session := state.Session{
+		Scenario:  scenarioID,
+		StartedAt: time.Now(),
+		Changes: []state.Change{
+			{
+				Type:          "service_state",
+				Target:        postgresService,
+				OriginalState: "running",
+			},
+		},
+	}
+
+	if err := state.Save(root, session); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "✓ Recovery state recorded")
+
+	rollback := func() {
+		_ = client.Start(postgresService)
+
+		if err := client.WaitForHealthy(postgresService, 30*time.Second); err != nil {
+			return
+		}
+
+		if err := platform.WaitForHTTPStatus(
+			"http://localhost:8081/readyz",
+			http.StatusOK,
+			20*time.Second,
+		); err != nil {
+			return
+		}
+
+		if err := platform.WaitForHTTPStatus(
+			"http://localhost:8080/api/products",
+			http.StatusOK,
+			20*time.Second,
+		); err != nil {
+			return
+		}
+
+		_ = state.Clear(root)
+	}
+
+	if err := client.Stop(postgresService); err != nil {
+		_ = state.Clear(root)
+		return err
+	}
+	fmt.Fprintln(out, "✓ PostgreSQL stopped")
+
+	postgresRunning, err = client.IsRunning(postgresService)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("verify PostgreSQL state: %w", err)
+	}
+	if postgresRunning {
+		rollback()
+		return fmt.Errorf("postgres-down verification failed: postgres is still running")
+	}
+	fmt.Fprintln(out, "✓ PostgreSQL unavailability verified")
+
+	catalogRunning, err = client.IsRunning(catalogService)
+	if err != nil {
+		rollback()
+		return fmt.Errorf("verify Catalog state: %w", err)
+	}
+	if !catalogRunning {
+		rollback()
+		return fmt.Errorf("postgres-down verification failed: catalog-service stopped")
+	}
+	fmt.Fprintln(out, "✓ Catalog container remains running")
+
+	if err := platform.WaitForHTTPStatus(
+		"http://localhost:8081/healthz",
+		http.StatusOK,
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("postgres-down liveness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog process remains alive")
+
+	if err := platform.WaitForHTTPFailure(
+		"http://localhost:8081/readyz",
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("postgres-down readiness verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Catalog readiness fails because PostgreSQL is unavailable")
+
+	if err := platform.WaitForHTTPFailure(
+		"http://localhost:8080/api/products",
+		10*time.Second,
+	); err != nil {
+		rollback()
+		return fmt.Errorf("postgres-down product-path verification failed: %w", err)
+	}
+	fmt.Fprintln(out, "✓ Customer product path failure verified")
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Incident active. Begin troubleshooting from the customer symptom.")
 
 	return nil
 }
