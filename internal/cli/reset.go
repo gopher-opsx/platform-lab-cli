@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -23,6 +24,7 @@ var resetCmd = &cobra.Command{
 		}
 
 		out := cmd.OutOrStdout()
+		userOut := out
 
 		if !state.Exists(root) {
 			fmt.Fprintln(
@@ -38,11 +40,20 @@ var resetCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Fprintf(
-			out,
-			"Resetting scenario: %s\n\n",
-			session.Scenario,
-		)
+		if session.Challenge {
+			fmt.Fprintln(userOut, "Resetting troubleshooting challenge")
+			fmt.Fprintln(userOut)
+			fmt.Fprintln(userOut, "Restoring Platform Lab baseline...")
+
+			// Keep the hidden scenario hidden during challenge cleanup.
+			out = io.Discard
+		} else {
+			fmt.Fprintf(
+				out,
+				"Resetting scenario: %s\n\n",
+				session.Scenario,
+			)
+		}
 
 		for i := len(session.Changes) - 1; i >= 0; i-- {
 			change := session.Changes[i]
@@ -371,9 +382,13 @@ var resetCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Fprintln(out)
+		if session.Challenge {
+			fmt.Fprintln(userOut, "✓ Challenge environment restored")
+		}
+
+		fmt.Fprintln(userOut)
 		fmt.Fprintln(
-			out,
+			userOut,
 			"✓ Lab changes removed.",
 		)
 

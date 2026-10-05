@@ -136,158 +136,61 @@ var startCmd = &cobra.Command{
 			s.Name,
 		)
 
-		switch s.ID {
-
-		case "restart-loop":
-			return startRestartLoop(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-		case "running-but-dead":
-			return startRunningButDead(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "bad-environment":
-			return startBadEnvironment(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "dns-failure":
-			return startDNSFailure(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "port-failure":
-			return startPortFailure(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "dependency-not-ready":
-			return startDependencyNotReady(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "lost-persistence":
-			return startLostPersistence(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "disk-growth":
-			return startDiskGrowth(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "cpu-pressure":
-			return startCPUPressure(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "memory-growth":
-			return startMemoryGrowth(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "oom-kill":
-			return startOOMKill(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "slow-dependency":
-			return startSlowDependency(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "resource-limits":
-			return startResourceLimits(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "postgres-down":
-			return startPostgresDown(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "redis-down":
-			return startRedisDown(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "kafka-down":
-			return startKafkaDown(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "kafka-consumer-stops":
-			return startKafkaConsumerStops(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		case "cascading-incident":
-			return startCascadingIncident(
-				out,
-				root,
-				client,
-				s.ID,
-			)
-
-		default:
-			return fmt.Errorf(
-				"scenario %q is defined but not implemented yet",
-				s.ID,
-			)
-		}
+		return startScenario(out, root, client, s.ID)
 	},
+}
+
+func startScenario(
+	out interface {
+		Write([]byte) (int, error)
+	},
+	root string,
+	client compose.Client,
+	scenarioID string,
+) error {
+	switch scenarioID {
+	case "restart-loop":
+		return startRestartLoop(out, root, client, scenarioID)
+	case "running-but-dead":
+		return startRunningButDead(out, root, client, scenarioID)
+	case "bad-environment":
+		return startBadEnvironment(out, root, client, scenarioID)
+	case "dns-failure":
+		return startDNSFailure(out, root, client, scenarioID)
+	case "port-failure":
+		return startPortFailure(out, root, client, scenarioID)
+	case "dependency-not-ready":
+		return startDependencyNotReady(out, root, client, scenarioID)
+	case "lost-persistence":
+		return startLostPersistence(out, root, client, scenarioID)
+	case "disk-growth":
+		return startDiskGrowth(out, root, client, scenarioID)
+	case "cpu-pressure":
+		return startCPUPressure(out, root, client, scenarioID)
+	case "memory-growth":
+		return startMemoryGrowth(out, root, client, scenarioID)
+	case "oom-kill":
+		return startOOMKill(out, root, client, scenarioID)
+	case "slow-dependency":
+		return startSlowDependency(out, root, client, scenarioID)
+	case "resource-limits":
+		return startResourceLimits(out, root, client, scenarioID)
+	case "postgres-down":
+		return startPostgresDown(out, root, client, scenarioID)
+	case "redis-down":
+		return startRedisDown(out, root, client, scenarioID)
+	case "kafka-down":
+		return startKafkaDown(out, root, client, scenarioID)
+	case "kafka-consumer-stops":
+		return startKafkaConsumerStops(out, root, client, scenarioID)
+	case "cascading-incident":
+		return startCascadingIncident(out, root, client, scenarioID)
+	default:
+		return fmt.Errorf(
+			"scenario %q is defined but not implemented yet",
+			scenarioID,
+		)
+	}
 }
 
 func startRestartLoop(

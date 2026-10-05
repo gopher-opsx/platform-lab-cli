@@ -5,6 +5,7 @@ import "time"
 type Session struct {
 	Scenario  string    `json:"scenario"`
 	StartedAt time.Time `json:"started_at"`
+	Challenge bool      `json:"challenge,omitempty"`
 	Changes   []Change  `json:"changes"`
 }
 

@@ -1,9 +1,9 @@
 id: lost-persistence
 name: PostgreSQL Lost Persistence
 description: >
-  Recreates PostgreSQL on isolated non-persistent storage, writes test data,
-  then recreates PostgreSQL again to prove that the data disappears.
-  The real Platform Lab PostgreSQL volume is never modified by the incident.
+  Demonstrates lost persistence by writing test data to one isolated
+  Lab-owned PostgreSQL volume and then recreating PostgreSQL on a different
+  fresh Lab-owned volume. The real Platform Lab PostgreSQL volume is untouched.
 
 course: 1
 lesson: 37
@@ -29,7 +29,7 @@ verify_failure:
     expected: healthy
   - type: persistence_marker
     target: postgres
-    expected: lost_after_recreation
+    expected: lost_after_storage_change
 
 rollback:
   - type: restore_compose_baseline

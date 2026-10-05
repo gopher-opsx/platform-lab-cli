@@ -30,6 +30,17 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
+		if session.Challenge {
+			fmt.Fprintln(out, "Active mode: troubleshooting challenge")
+			fmt.Fprintf(
+				out,
+				"Started: %s\n",
+				session.StartedAt.Format("2006-01-02 15:04:05"),
+			)
+			fmt.Fprintln(out, "Incident is active. The selected scenario remains hidden.")
+			return nil
+		}
+
 		fmt.Fprintf(
 			out,
 			"Active scenario: %s\n",
