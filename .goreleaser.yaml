@@ -1,0 +1,47 @@
+version: 2
+
+builds:
+  - id: lab
+    main: ./cmd/lab
+    binary: lab
+
+    env:
+      - CGO_ENABLED=0
+
+    flags:
+      - -trimpath
+
+    ldflags:
+      - -s -w
+      - -X github.com/gopher-opsx/platform-lab-cli/internal/cli.version={{.Version}}
+      - -X github.com/gopher-opsx/platform-lab-cli/internal/cli.commit={{.Commit}}
+
+    goos:
+      - linux
+      - darwin
+      - windows
+
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - ids:
+      - lab
+
+    name_template: >-
+      platform-lab-cli_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+    formats:
+      - tar.gz
+
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: checksums.txt
